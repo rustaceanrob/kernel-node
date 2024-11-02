@@ -9,12 +9,11 @@ use std::{
 use bitcoin::{
     consensus::{encode, Decodable},
     hashes::Hash,
-    network::{
-        constants::ServiceFlags,
+    p2p::{
         message::{NetworkMessage, RawNetworkMessage},
         message_blockdata::{GetBlocksMessage, Inventory},
         message_network::VersionMessage,
-        Address,
+        Address, ServiceFlags,
     },
     BlockHash, Network,
 };
@@ -73,10 +72,7 @@ impl BitcoinPeer {
     }
 
     fn send_message(&mut self, msg: NetworkMessage) -> std::io::Result<()> {
-        let raw_msg = RawNetworkMessage {
-            magic: self.network.magic(),
-            payload: msg,
-        };
+        let raw_msg = RawNetworkMessage::new(self.network.magic(), msg);
         let bytes = encode::serialize(&raw_msg);
         self.stream.write_all(&bytes)?;
         Ok(())
@@ -85,26 +81,29 @@ impl BitcoinPeer {
     fn receive_message(&mut self) -> std::io::Result<NetworkMessage> {
         let raw_msg = RawNetworkMessage::consensus_decode(&mut self.stream)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        Ok(raw_msg.payload)
+        Ok(raw_msg.payload().clone())
     }
 }
 
 // Version message for handshake
-fn create_version_message(addr: SocketAddr) -> NetworkMessage {
+fn create_version_message(addr: SocketAddr, height: i32) -> NetworkMessage {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
-    NetworkMessage::Version(VersionMessage::new(
-        ServiceFlags::NONE,
+    let mut version_message = VersionMessage::new(
+        ServiceFlags::WITNESS,
         timestamp,
-        Address::new(&addr, ServiceFlags::NONE),
-        Address::new(&addr, ServiceFlags::NONE),
+        Address::new(&addr, ServiceFlags::WITNESS),
+        Address::new(&addr, ServiceFlags::WITNESS),
         0,
         "kernel-node".to_string(),
-        0,
-    ))
+        height,
+    );
+    version_message.version = 70015;
+
+    NetworkMessage::Version(version_message)
 }
 
 // GetBlocks message to request block inventories
@@ -120,7 +119,7 @@ fn create_getblocks_message(known_block_hash: BlockHash) -> NetworkMessage {
 fn create_getdata_message(block_hashes: Vec<BlockHash>) -> NetworkMessage {
     let inventory: Vec<Inventory> = block_hashes
         .into_iter()
-        .map(|hash| Inventory::Block(hash))
+        .map(|hash| Inventory::WitnessBlock(hash))
         .collect();
 
     NetworkMessage::GetData(inventory)
@@ -148,10 +147,12 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
     let mut peer = BitcoinPeer::new(addr, network)?;
     info!("Connected to peer");
 
+    let height = chainman.get_block_index_tip().info().height;
     // Initial handshake
-    peer.send_message(create_version_message(addr))?;
+    peer.send_message(create_version_message(addr, height))?;
     info!("Sent version message");
 
+    // Out of order block handling
     let mut pending_blocks: HashMap<
         BlockHash,                   /*prev */
         libbitcoinkernel_sys::Block, /*block */
@@ -162,8 +163,8 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
     loop {
         match peer.receive_message() {
             Ok(msg) => match msg {
-                NetworkMessage::Version(_) => {
-                    info!("Received version");
+                NetworkMessage::Version(version) => {
+                    info!("Received version: {:?}", version);
                     peer.send_message(NetworkMessage::Verack)?;
                 }
                 NetworkMessage::Verack => {
@@ -177,8 +178,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                     info!("Requested initial blocks starting at {}", tip_hash);
                 }
                 NetworkMessage::Inv(inventory) => {
-                    info!("Received inventory with {} items", inventory.len());
-
+                    debug!("Received inventory with {} items", inventory.len());
                     let block_hashes: Vec<BlockHash> = inventory
                         .iter()
                         .filter_map(|inv| match inv {
@@ -186,22 +186,18 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                             _ => None,
                         })
                         .collect();
-                    info!("Received {} block hashes", block_hashes.len());
 
                     if !block_hashes.is_empty() {
                         n_requested_blocks += block_hashes.len();
-                        info!("Requesting {} blocks", block_hashes.len());
+                        debug!("Requesting {} blocks", block_hashes.len());
                         peer.send_message(create_getdata_message(block_hashes))?;
                     }
                 }
                 NetworkMessage::Block(bitcoin_block) => {
                     n_requested_blocks -= 1;
-                    let tip = chainman.get_block_index_tip();
                     debug!(
-                        "Received block: {} with prev: {} on tip: {} from {}",
+                        "Received block: {} from {}",
                         bitcoin_block.block_hash(),
-                        bitcoin_block.header.prev_blockhash,
-                        get_block_hash(tip, &chainman).unwrap(),
                         addr
                     );
                     let tip = chainman.get_block_index_tip();
@@ -213,14 +209,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
 
                     let kernel_block = bitcoin_block_to_kernel_block(&bitcoin_block);
                     match chainman.process_block(&kernel_block) {
-                        Ok(()) => {
-                            let height = chainman
-                                .get_block_index_by_hash(bitcoin_block.block_hash().into_inner())
-                                .unwrap()
-                                .info()
-                                .height;
-                            info!("Processed block at height: {}", height);
-                        }
+                        Ok(()) => {}
                         Err(err) => {
                             debug!("Process block error: {:?}", err);
                             pending_blocks
@@ -230,15 +219,18 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                     };
                     if n_requested_blocks == 0 {
                         while !pending_blocks.is_empty() {
-                            info!("Attempting to dump the pending blocks.");
                             let tip_index = chainman.get_block_index_tip();
+                            info!(
+                                "Attempting to dump the pending blocks, current height: {}.",
+                                tip_index.info().height
+                            );
                             let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
                             if let Some(kernel_block) = pending_blocks.remove(&tip_hash) {
                                 match chainman.process_block(&kernel_block) {
                                     Ok(()) => {
                                         let height = chainman
                                             .get_block_index_by_hash(
-                                                bitcoin_block.block_hash().into_inner(),
+                                                bitcoin_block.block_hash().to_byte_array(),
                                             )
                                             .unwrap()
                                             .info()
@@ -253,6 +245,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                                     }
                                 };
                             } else {
+                                chainman.import_blocks().unwrap();
                                 pending_blocks.clear();
                                 let tip_index = chainman.get_block_index_tip();
                                 let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
