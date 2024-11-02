@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    fs,
     io::{Cursor, Write},
     net::{SocketAddr, TcpStream},
+    path::PathBuf,
     sync::Once,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,6 +19,8 @@ use bitcoin::{
     },
     BlockHash, Network,
 };
+use clap::{Parser, ValueEnum};
+use home::home_dir;
 use libbitcoinkernel_sys::{
     BlockIndex, BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
     ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
@@ -24,9 +28,72 @@ use libbitcoinkernel_sys::{
 };
 use log::{debug, info, warn};
 
-fn create_context() -> Context {
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Which Bitcoin network to use
+    #[arg(value_enum, short, long, default_value = "signet")]
+    network: BitcoinNetwork,
+
+    /// Data directory for blockchain and configuration
+    #[arg(long, default_value = "~/.kernel-node")]
+    datadir: String,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum BitcoinNetwork {
+    Mainnet,
+    Testnet,
+    Signet,
+    Regtest,
+}
+
+impl From<BitcoinNetwork> for bitcoin::Network {
+    fn from(network: BitcoinNetwork) -> Self {
+        match network {
+            BitcoinNetwork::Mainnet => Network::Bitcoin,
+            BitcoinNetwork::Testnet => Network::Testnet,
+            BitcoinNetwork::Signet => Network::Signet,
+            BitcoinNetwork::Regtest => Network::Regtest,
+        }
+    }
+}
+
+impl From<BitcoinNetwork> for libbitcoinkernel_sys::ChainType {
+    fn from(network: BitcoinNetwork) -> Self {
+        match network {
+            BitcoinNetwork::Mainnet => libbitcoinkernel_sys::ChainType::MAINNET,
+            BitcoinNetwork::Testnet => libbitcoinkernel_sys::ChainType::TESTNET,
+            BitcoinNetwork::Signet => libbitcoinkernel_sys::ChainType::SIGNET,
+            BitcoinNetwork::Regtest => libbitcoinkernel_sys::ChainType::REGTEST,
+        }
+    }
+}
+
+impl Args {
+    fn get_data_dir(&self) -> String {
+        let path = if self.datadir.starts_with("~/") {
+            if let Some(mut home) = home_dir() {
+                home.push(&self.datadir[2..]);
+                home
+            } else {
+                PathBuf::from(&self.datadir)
+            }
+        } else {
+            PathBuf::from(&self.datadir)
+        };
+
+        // Create directories if they don't exist
+        fs::create_dir_all(&path).unwrap();
+
+        // Get canonical (full) path
+        path.canonicalize().unwrap().to_str().unwrap().to_string()
+    }
+}
+
+fn create_context(chain_type: ChainType) -> Context {
     ContextBuilder::new()
-        .chain_type(ChainType::SIGNET)
+        .chain_type(chain_type)
         .kn_callbacks(Box::new(KernelNotificationInterfaceCallbackHolder {
             kn_block_tip: Box::new(|_state, _block_index| {}),
             kn_header_tip: Box::new(|_state, _height, _timestamp, _presync| {}),
@@ -275,12 +342,13 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let args = Args::parse();
     START.call_once(|| {
         setup_logging();
     });
-    let context = create_context();
-    let data_dir = "/home/drgrid/.kernel-node";
-    let blocks_dir = data_dir.to_owned() + "/blocks";
+    let context = create_context(args.network.into());
+    let data_dir = args.get_data_dir();
+    let blocks_dir = data_dir.clone() + "/blocks";
     let chainman = ChainstateManager::new(
         ChainstateManagerOptions::new(&context, &data_dir).unwrap(),
         BlockManagerOptions::new(&context, &blocks_dir).unwrap(),
@@ -295,5 +363,5 @@ async fn main() -> std::io::Result<()> {
 
     info!("Bitcoin kernel initialized");
 
-    run_connection(Network::Signet, chainman).await
+    run_connection(args.network.into(), chainman).await
 }
