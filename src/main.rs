@@ -199,9 +199,8 @@ fn deserialize_block(raw_data: Vec<u8>) -> Result<bitcoin::Block, encode::Error>
 
 fn get_block_hash(
     index: BlockIndex,
-    chainman: &ChainstateManager,
-) -> Result<BlockHash, encode::Error> {
-    Ok(deserialize_block(chainman.read_block_data(&index).unwrap().into())?.block_hash())
+) -> BlockHash {
+    BlockHash::from_byte_array(index.info().hash)
 }
 
 fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> libbitcoinkernel_sys::Block {
@@ -214,7 +213,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
     let mut peer = BitcoinPeer::new(addr, network)?;
     info!("Connected to peer");
 
-    let height = chainman.get_block_index_tip().info().height;
+    let height = chainman.get_block_index_tip().height();
     // Initial handshake
     peer.send_message(create_version_message(addr, height))?;
     info!("Sent version message");
@@ -238,7 +237,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                     info!("Received verack - handshake complete");
 
                     let tip_index = chainman.get_block_index_tip();
-                    let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
+                    let tip_hash = get_block_hash(tip_index);
 
                     let getblocks = create_getblocks_message(tip_hash);
                     peer.send_message(getblocks)?;
@@ -268,8 +267,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                         addr
                     );
                     let tip = chainman.get_block_index_tip();
-                    if bitcoin_block.header.prev_blockhash
-                        != get_block_hash(tip, &chainman).unwrap()
+                    if bitcoin_block.header.prev_blockhash != get_block_hash(tip)
                     {
                         debug!("This block is out of order!");
                     }
@@ -289,19 +287,22 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                             let tip_index = chainman.get_block_index_tip();
                             info!(
                                 "Attempting to dump the pending blocks, current height: {}.",
-                                tip_index.info().height
+                                tip_index.height()
                             );
-                            let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
+                            let tip_hash = get_block_hash(tip_index);
                             if let Some(kernel_block) = pending_blocks.remove(&tip_hash) {
                                 match chainman.process_block(&kernel_block) {
                                     Ok(()) => {
                                         let height = chainman
                                             .get_block_index_by_hash(
-                                                bitcoin_block.block_hash().to_byte_array(),
+                                                libbitcoinkernel_sys::BlockHash {
+                                                    hash: bitcoin_block
+                                                        .block_hash()
+                                                        .to_byte_array(),
+                                                },
                                             )
                                             .unwrap()
-                                            .info()
-                                            .height;
+                                            .height();
                                         info!("Processed block at height: {}", height);
                                     }
                                     Err(err) => {
@@ -312,10 +313,9 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                                     }
                                 };
                             } else {
-                                chainman.import_blocks().unwrap();
                                 pending_blocks.clear();
                                 let tip_index = chainman.get_block_index_tip();
-                                let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
+                                let tip_hash = get_block_hash(tip_index);
                                 let getblocks = create_getblocks_message(tip_hash);
                                 peer.send_message(getblocks)?;
                             }
