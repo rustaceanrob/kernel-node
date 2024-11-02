@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{Cursor, Write},
     net::{SocketAddr, TcpStream},
     sync::Once,
@@ -22,7 +23,7 @@ use libbitcoinkernel_sys::{
     ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
     Log, Logger,
 };
-use log::info;
+use log::{debug, info, warn};
 
 fn create_context() -> Context {
     ContextBuilder::new()
@@ -151,6 +152,12 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
     peer.send_message(create_version_message(addr))?;
     info!("Sent version message");
 
+    let mut pending_blocks: HashMap<
+        BlockHash,                   /*prev */
+        libbitcoinkernel_sys::Block, /*block */
+    > = HashMap::new();
+    let mut n_requested_blocks = 0;
+
     // Basic message handling loop
     loop {
         match peer.receive_message() {
@@ -162,12 +169,12 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                 NetworkMessage::Verack => {
                     info!("Received verack - handshake complete");
 
-                    let genesis_index = chainman.get_block_index_genesis();
-                    let hash = get_block_hash(genesis_index, &chainman).unwrap();
+                    let tip_index = chainman.get_block_index_tip();
+                    let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
 
-                    let getblocks = create_getblocks_message(hash);
+                    let getblocks = create_getblocks_message(tip_hash);
                     peer.send_message(getblocks)?;
-                    info!("Requested initial blocks starting at {}", hash);
+                    info!("Requested initial blocks starting at {}", tip_hash);
                 }
                 NetworkMessage::Inv(inventory) => {
                     info!("Received inventory with {} items", inventory.len());
@@ -182,22 +189,77 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                     info!("Received {} block hashes", block_hashes.len());
 
                     if !block_hashes.is_empty() {
+                        n_requested_blocks += block_hashes.len();
                         info!("Requesting {} blocks", block_hashes.len());
                         peer.send_message(create_getdata_message(block_hashes))?;
                     }
                 }
                 NetworkMessage::Block(bitcoin_block) => {
-                    info!("Received block: {} from {}", bitcoin_block.block_hash(), addr);
+                    n_requested_blocks -= 1;
+                    let tip = chainman.get_block_index_tip();
+                    debug!(
+                        "Received block: {} with prev: {} on tip: {} from {}",
+                        bitcoin_block.block_hash(),
+                        bitcoin_block.header.prev_blockhash,
+                        get_block_hash(tip, &chainman).unwrap(),
+                        addr
+                    );
+                    let tip = chainman.get_block_index_tip();
+                    if bitcoin_block.header.prev_blockhash
+                        != get_block_hash(tip, &chainman).unwrap()
+                    {
+                        debug!("This block is out of order!");
+                    }
+
                     let kernel_block = bitcoin_block_to_kernel_block(&bitcoin_block);
-                    let res = chainman.process_block(&kernel_block);
-                    info!("Process block result: {:?}", res);
-                    if res.is_ok() {
-                        let height = chainman
-                            .get_block_index_by_hash(bitcoin_block.block_hash().into_inner())
-                            .unwrap()
-                            .info()
-                            .height;
-                        info!("Processed block at height: {}", height);
+                    match chainman.process_block(&kernel_block) {
+                        Ok(()) => {
+                            let height = chainman
+                                .get_block_index_by_hash(bitcoin_block.block_hash().into_inner())
+                                .unwrap()
+                                .info()
+                                .height;
+                            info!("Processed block at height: {}", height);
+                        }
+                        Err(err) => {
+                            debug!("Process block error: {:?}", err);
+                            pending_blocks
+                                .insert(bitcoin_block.header.prev_blockhash, kernel_block);
+                            debug!("n_requested_blocks: {}", n_requested_blocks);
+                        }
+                    };
+                    if n_requested_blocks == 0 {
+                        while !pending_blocks.is_empty() {
+                            info!("Attempting to dump the pending blocks.");
+                            let tip_index = chainman.get_block_index_tip();
+                            let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
+                            if let Some(kernel_block) = pending_blocks.remove(&tip_hash) {
+                                match chainman.process_block(&kernel_block) {
+                                    Ok(()) => {
+                                        let height = chainman
+                                            .get_block_index_by_hash(
+                                                bitcoin_block.block_hash().into_inner(),
+                                            )
+                                            .unwrap()
+                                            .info()
+                                            .height;
+                                        info!("Processed block at height: {}", height);
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            "Cannot retry again after process block error: {:?}",
+                                            err
+                                        );
+                                    }
+                                };
+                            } else {
+                                pending_blocks.clear();
+                                let tip_index = chainman.get_block_index_tip();
+                                let tip_hash = get_block_hash(tip_index, &chainman).unwrap();
+                                let getblocks = create_getblocks_message(tip_hash);
+                                peer.send_message(getblocks)?;
+                            }
+                        }
                     }
                 }
                 NetworkMessage::Ping(nonce) => {
