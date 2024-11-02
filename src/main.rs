@@ -192,14 +192,7 @@ fn create_getdata_message(block_hashes: Vec<BlockHash>) -> NetworkMessage {
     NetworkMessage::GetData(inventory)
 }
 
-fn deserialize_block(raw_data: Vec<u8>) -> Result<bitcoin::Block, encode::Error> {
-    let mut cursor = Cursor::new(raw_data);
-    encode::Decodable::consensus_decode(&mut cursor)
-}
-
-fn get_block_hash(
-    index: BlockIndex,
-) -> BlockHash {
+fn get_block_hash(index: BlockIndex) -> BlockHash {
     BlockHash::from_byte_array(index.info().hash)
 }
 
@@ -267,8 +260,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                         addr
                     );
                     let tip = chainman.get_block_index_tip();
-                    if bitcoin_block.header.prev_blockhash != get_block_hash(tip)
-                    {
+                    if bitcoin_block.header.prev_blockhash != get_block_hash(tip) {
                         debug!("This block is out of order!");
                     }
 
