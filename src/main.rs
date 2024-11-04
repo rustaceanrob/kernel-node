@@ -19,13 +19,13 @@ use bitcoin::{
     },
     BlockHash, Network,
 };
-use clap::{Parser, ValueEnum};
-use home::home_dir;
-use libbitcoinkernel_sys::{
+use bitcoinkernel::{
     BlockIndex, BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
     ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
     Log, Logger,
 };
+use clap::{Parser, ValueEnum};
+use home::home_dir;
 use log::{debug, info, warn};
 
 #[derive(Parser, Debug)]
@@ -59,13 +59,13 @@ impl From<BitcoinNetwork> for bitcoin::Network {
     }
 }
 
-impl From<BitcoinNetwork> for libbitcoinkernel_sys::ChainType {
+impl From<BitcoinNetwork> for ChainType {
     fn from(network: BitcoinNetwork) -> Self {
         match network {
-            BitcoinNetwork::Mainnet => libbitcoinkernel_sys::ChainType::MAINNET,
-            BitcoinNetwork::Testnet => libbitcoinkernel_sys::ChainType::TESTNET,
-            BitcoinNetwork::Signet => libbitcoinkernel_sys::ChainType::SIGNET,
-            BitcoinNetwork::Regtest => libbitcoinkernel_sys::ChainType::REGTEST,
+            BitcoinNetwork::Mainnet => ChainType::MAINNET,
+            BitcoinNetwork::Testnet => ChainType::TESTNET,
+            BitcoinNetwork::Signet => ChainType::SIGNET,
+            BitcoinNetwork::Regtest => ChainType::REGTEST,
         }
     }
 }
@@ -112,7 +112,7 @@ struct KernelLog {}
 impl Log for KernelLog {
     fn log(&self, message: &str) {
         log::info!(
-            target: "libbitcoinkernel", 
+            target: "bitcoinkernel", 
             "{}", message.strip_suffix("\r\n").or_else(|| message.strip_suffix('\n')).unwrap_or(message));
     }
 }
@@ -196,9 +196,9 @@ fn get_block_hash(index: BlockIndex) -> BlockHash {
     BlockHash::from_byte_array(index.info().hash)
 }
 
-fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> libbitcoinkernel_sys::Block {
+fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::Block {
     let ser_block = encode::serialize(block);
-    libbitcoinkernel_sys::Block::try_from(ser_block.as_slice()).unwrap()
+    bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
 }
 
 async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> std::io::Result<()> {
@@ -213,8 +213,8 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
 
     // Out of order block handling
     let mut pending_blocks: HashMap<
-        BlockHash,                   /*prev */
-        libbitcoinkernel_sys::Block, /*block */
+        BlockHash,            /*prev */
+        bitcoinkernel::Block, /*block */
     > = HashMap::new();
     let mut n_requested_blocks = 0;
 
@@ -286,13 +286,9 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                                 match chainman.process_block(&kernel_block) {
                                     Ok(()) => {
                                         let height = chainman
-                                            .get_block_index_by_hash(
-                                                libbitcoinkernel_sys::BlockHash {
-                                                    hash: bitcoin_block
-                                                        .block_hash()
-                                                        .to_byte_array(),
-                                                },
-                                            )
+                                            .get_block_index_by_hash(bitcoinkernel::BlockHash {
+                                                hash: bitcoin_block.block_hash().to_byte_array(),
+                                            })
                                             .unwrap()
                                             .height();
                                         info!("Processed block at height: {}", height);
