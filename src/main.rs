@@ -27,6 +27,7 @@ use bitcoinkernel::{
 use clap::{Parser, ValueEnum};
 use home::home_dir;
 use log::{debug, info, warn};
+use tokio::net::lookup_host;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -38,6 +39,10 @@ struct Args {
     /// Data directory for blockchain and configuration
     #[arg(long, default_value = "~/.kernel-node")]
     datadir: String,
+
+    /// Connect only to this node (format: ip:port or hostname:port)
+    #[arg(long)]
+    connect: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -127,6 +132,53 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
+const SIGNET_SEEDS: &[&str] = &[
+    "seed.signet.bitcoin.sprovoost.nl.",
+    "seed.signet.achownodes.xyz.",
+];
+
+const MAINNET_SEEDS: &[&str] = &[
+    "seed.bitcoin.sipa.be.",
+    "dnsseed.bluematt.me.",
+    "dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us.",
+    "seed.bitcoin.jonasschnelli.ch.",
+    "seed.btc.petertodd.net.",
+    "seed.bitcoin.sprovoost.nl.",
+    "dnsseed.emzy.de.",
+    "seed.bitcoin.wiz.biz.",
+    "seed.mainnet.achownodes.xyz.",
+];
+
+const TESTNET_SEEDS: &[&str] = &[
+    "testnet-seed.bitcoin.jonasschnelli.ch.",
+    "seed.tbtc.petertodd.net.",
+    "seed.testnet.bitcoin.sprovoost.nl.",
+    "testnet-seed.bluematt.me.",
+    "seed.testnet.achownodes.xyz.",
+];
+
+fn get_seeds(network: Network) -> &'static [&'static str] {
+    match network {
+        Network::Bitcoin => MAINNET_SEEDS,
+        Network::Testnet => TESTNET_SEEDS,
+        Network::Signet => SIGNET_SEEDS,
+        Network::Regtest => panic!("Regtest does not support seed nodes, use -connect instead"),
+        _ => panic!("not supported."),
+    }
+}
+
+fn resolve_seeds(seeds: &[&str]) -> Vec<SocketAddr> {
+    let mut addresses = Vec::new();
+    for seed in seeds {
+        if let Ok(ips) = dns_lookup::lookup_host(seed) {
+            for ip in ips {
+                addresses.push(SocketAddr::new(ip, 38333));
+            }
+        }
+    }
+    addresses
+}
+
 struct BitcoinPeer {
     stream: TcpStream,
     network: Network,
@@ -201,8 +253,20 @@ fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::Block
     bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
 }
 
-async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> std::io::Result<()> {
-    let addr: SocketAddr = "127.0.0.1:38333".parse().unwrap();
+async fn run_connection(
+    network: Network,
+    connect: Option<SocketAddr>,
+    chainman: ChainstateManager<'_>,
+) -> std::io::Result<()> {
+    let addr = if let Some(addr) = connect {
+        addr
+    } else {
+        let seeds = get_seeds(network);
+        info!("These are the seeds we are going to use: {:?}", seeds);
+        let addresses = resolve_seeds(seeds);
+        info!("These are the resolved addresses: {:?}", addresses);
+        addresses[0]
+    };
     let mut peer = BitcoinPeer::new(addr, network)?;
     info!("Connected to peer");
 
@@ -254,7 +318,7 @@ async fn run_connection(network: Network, chainman: ChainstateManager<'_>) -> st
                 }
                 NetworkMessage::Block(bitcoin_block) => {
                     n_requested_blocks -= 1;
-                    debug!(
+                    info!(
                         "Received block: {} from {}",
                         bitcoin_block.block_hash(),
                         addr
@@ -351,5 +415,11 @@ async fn main() -> std::io::Result<()> {
 
     info!("Bitcoin kernel initialized");
 
-    run_connection(args.network.into(), chainman).await
+    let connect: Option<SocketAddr> = if let Some(connect) = args.connect {
+        Some(connect.parse().unwrap())
+    } else {
+        None
+    };
+
+    run_connection(args.network.into(), connect, chainman).await
 }
