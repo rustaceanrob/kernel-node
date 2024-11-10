@@ -444,12 +444,15 @@ async fn run_connection(
         _ = tokio::signal::ctrl_c() => {
             context.interrupt();
             info!("Received interrupt signal, shutting down...");
+            return Ok(());
         }
         _ = shutdown_rx.recv() => {
             context.interrupt();
             info!("Received shutdown signal, shutting down...");
+            return Ok(());
         }
     }
+    info!("exiting.");
     Ok(())
 }
 
@@ -459,7 +462,7 @@ async fn main() -> std::io::Result<()> {
     START.call_once(|| {
         setup_logging();
     });
-    let (shutdown_tx, shutdown_rx) = broadcast::channel(32);
+    let (shutdown_tx, mut shutdown_rx) = broadcast::channel(32);
     let context = create_context(args.network.into(), shutdown_tx);
     let data_dir = args.get_data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
@@ -480,6 +483,11 @@ async fn main() -> std::io::Result<()> {
     } else {
         None
     };
+
+    if shutdown_rx.try_recv().is_ok() {
+        info!("Shutting down!");
+        return Ok(())
+    }
 
     run_connection(
         args.network.into(),
