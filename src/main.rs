@@ -1,10 +1,13 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{Cursor, Write},
-    net::{SocketAddr},
+    io::Cursor,
+    net::SocketAddr,
     path::PathBuf,
-    sync::Once,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Once,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,13 +25,13 @@ use bitcoin::{
 use bitcoinkernel::{
     BlockIndex, BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
     ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
-    Log, Logger,
+    Log, Logger, SynchronizationState,
 };
 use clap::{Parser, ValueEnum};
 use home::home_dir;
-use log::{debug, info, warn};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::lookup_host};
-use tokio::net::TcpStream;
+use log::{debug, error, info, warn};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{net::TcpStream, sync::broadcast};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -97,17 +100,44 @@ impl Args {
     }
 }
 
-fn create_context(chain_type: ChainType) -> Context {
+fn create_context(chain_type: ChainType, shutdown_tx: broadcast::Sender<()>) -> Context {
+    let shutdown_triggered = Arc::new(AtomicBool::new(false));
+    let shutdown_triggered_clone = Arc::clone(&shutdown_triggered);
+    let shutdown_tx_clone = shutdown_tx.clone();
     ContextBuilder::new()
         .chain_type(chain_type)
         .kn_callbacks(Box::new(KernelNotificationInterfaceCallbackHolder {
-            kn_block_tip: Box::new(|_state, _block_index| {}),
-            kn_header_tip: Box::new(|_state, _height, _timestamp, _presync| {}),
-            kn_progress: Box::new(|_title, _progress, _resume_possible| {}),
+            kn_block_tip: Box::new(|state, block_hash| {
+                match state {
+                    SynchronizationState::INIT_DOWNLOAD => info!("Received new block tip {:?} during IBD.", block_hash),
+                    SynchronizationState::POST_INIT => info!("Received new block {:?}", block_hash),
+                    SynchronizationState::INIT_REINDEX => info!("Moved new block tip {:?} during reindex.", block_hash),
+                };
+            }),
+            kn_header_tip: Box::new(|state, height, timestamp, presync| {
+                match state {
+                    SynchronizationState::INIT_DOWNLOAD => info!("Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::POST_INIT => info!("Received new header tip at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::INIT_REINDEX => info!("Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                }
+            }),
+            kn_progress: Box::new(|title, progress, resume_possible| {
+                warn!("Made progress {}: {}. Can resume: {}", title, progress, resume_possible)
+            }),
             kn_warning_set: Box::new(|_warning, _message| {}),
             kn_warning_unset: Box::new(|_warning| {}),
-            kn_flush_error: Box::new(|_message| {}),
-            kn_fatal_error: Box::new(|_message| {}),
+            kn_flush_error: Box::new(move |message| {
+                if !shutdown_triggered.swap(true, Ordering::SeqCst) {
+                    shutdown_tx.send(()).expect("failed to send shutdown signal");
+                }
+                error!("Fatal flush error encountered: {}", message);
+            }),
+            kn_fatal_error: Box::new(move |message| {
+                error!("Fatal error encountered: {}", message);
+                if !shutdown_triggered_clone.swap(true, Ordering::SeqCst) {
+                    shutdown_tx_clone.send(()).expect("failed to send shutdown signal");
+                }
+            }),
         }))
         .build()
         .unwrap()
@@ -199,25 +229,25 @@ impl BitcoinPeer {
     }
 
     async fn receive_message(&mut self) -> std::io::Result<NetworkMessage> {
+        // First read the header, then the payload. Do this, because we cannot read all at once in an async context.
         let mut header_buf = [0u8; 24];
         self.stream.read_exact(&mut header_buf).await?;
         let payload_len = u32::from_le_bytes([
             header_buf[16],
             header_buf[17],
             header_buf[18],
-            header_buf[19]
+            header_buf[19],
         ]) as usize;
-        
+
         let mut payload_buf = vec![0u8; payload_len];
         self.stream.read_exact(&mut payload_buf).await?;
-        
-        let raw_msg = RawNetworkMessage::consensus_decode(&mut Cursor::new([header_buf.as_slice(), payload_buf.as_slice()].concat()))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-            
+
+        let raw_msg = RawNetworkMessage::consensus_decode(&mut Cursor::new(
+            [header_buf.as_slice(), payload_buf.as_slice()].concat(),
+        ))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
         Ok(raw_msg.payload().clone())
-        // let raw_msg = RawNetworkMessage::consensus_decode(&mut self.stream)
-            // .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        // Ok(raw_msg.payload().clone())
     }
 }
 
@@ -275,6 +305,7 @@ async fn run_connection(
     connect: Option<SocketAddr>,
     chainman: ChainstateManager<'_>,
     context: &Context,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let addr = if let Some(addr) = connect {
         addr
@@ -290,7 +321,8 @@ async fn run_connection(
 
     let height = chainman.get_block_index_tip().height();
     // Initial handshake
-    peer.send_message(create_version_message(addr, height)).await?;
+    peer.send_message(create_version_message(addr, height))
+        .await?;
     info!("Sent version message");
 
     // Out of order block handling
@@ -352,7 +384,7 @@ async fn run_connection(
                             match chainman.process_block(&kernel_block) {
                                 Ok(()) => {}
                                 Err(err) => {
-                                    debug!("Process block error: {:?}", err);
+                                    warn!("Process block error: {:?}", err);
                                     pending_blocks
                                         .insert(bitcoin_block.header.prev_blockhash, kernel_block);
                                     debug!("n_requested_blocks: {}", n_requested_blocks);
@@ -413,6 +445,10 @@ async fn run_connection(
             context.interrupt();
             info!("Received interrupt signal, shutting down...");
         }
+        _ = shutdown_rx.recv() => {
+            context.interrupt();
+            info!("Received shutdown signal, shutting down...");
+        }
     }
     Ok(())
 }
@@ -423,7 +459,8 @@ async fn main() -> std::io::Result<()> {
     START.call_once(|| {
         setup_logging();
     });
-    let context = create_context(args.network.into());
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(32);
+    let context = create_context(args.network.into(), shutdown_tx);
     let data_dir = args.get_data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman = ChainstateManager::new(
@@ -433,9 +470,7 @@ async fn main() -> std::io::Result<()> {
     )
     .unwrap();
 
-    chainman
-        .load_chainstate(ChainstateLoadOptions::new())
-        .unwrap();
+    chainman.load_chainstate(ChainstateLoadOptions::new()).unwrap();
     chainman.import_blocks().unwrap();
 
     info!("Bitcoin kernel initialized");
@@ -446,5 +481,12 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
-    run_connection(args.network.into(), connect, chainman, &context).await
+    run_connection(
+        args.network.into(),
+        connect,
+        chainman,
+        &context,
+        shutdown_rx,
+    )
+    .await
 }
