@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Once,
+        Arc, Once,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -473,8 +473,14 @@ async fn main() -> std::io::Result<()> {
     )
     .unwrap();
 
-    chainman.load_chainstate(ChainstateLoadOptions::new()).unwrap();
-    chainman.import_blocks().unwrap();
+    if let Err(err) = chainman.load_chainstate(ChainstateLoadOptions::new()) {
+        error!("Error loading chainstate: {}", err);
+        return Ok(());
+    }
+    if let Err(err) = chainman.import_blocks() {
+        error!("Error importing blocks: {}", err);
+        return Ok(());
+    }
 
     info!("Bitcoin kernel initialized");
 
@@ -486,7 +492,7 @@ async fn main() -> std::io::Result<()> {
 
     if shutdown_rx.try_recv().is_ok() {
         info!("Shutting down!");
-        return Ok(())
+        return Ok(());
     }
 
     run_connection(
