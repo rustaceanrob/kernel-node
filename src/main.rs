@@ -23,9 +23,11 @@ use bitcoin::{
     BlockHash, Network,
 };
 use bitcoinkernel::{
-    BlockIndex, BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
+    register_validation_interface, unregister_validation_interface, BlockIndex,
+    BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
     ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
-    Log, Logger, SynchronizationState,
+    Log, Logger, SynchronizationState, ValidationInterfaceCallbackHolder,
+    ValidationInterfaceWrapper,
 };
 use clap::{Parser, ValueEnum};
 use home::home_dir;
@@ -163,6 +165,17 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
+fn setup_validation_interface(context: &Context) -> ValidationInterfaceWrapper {
+    let validation_interface =
+        ValidationInterfaceWrapper::new(Box::new(ValidationInterfaceCallbackHolder {
+            block_checked: Box::new(|_block, _mode, _result| {
+                log::info!("Block checked!");
+            }),
+        }));
+    register_validation_interface(&validation_interface, &context).unwrap();
+    validation_interface
+}
+
 const SIGNET_SEEDS: &[&str] = &[
     "seed.signet.bitcoin.sprovoost.nl.",
     "seed.signet.achownodes.xyz.",
@@ -262,7 +275,7 @@ fn create_version_message(addr: SocketAddr, height: i32) -> NetworkMessage {
         ServiceFlags::WITNESS,
         timestamp,
         Address::new(&addr, ServiceFlags::WITNESS),
-        Address::new(&addr, ServiceFlags::WITNESS),
+        Address::new(&SocketAddr::from(([0, 0, 0, 0], 0)), ServiceFlags::NONE),
         0,
         "kernel-node".to_string(),
         height,
@@ -473,6 +486,8 @@ async fn main() -> std::io::Result<()> {
     )
     .unwrap();
 
+    let validation_interface = setup_validation_interface(&context);
+
     if let Err(err) = chainman.load_chainstate(ChainstateLoadOptions::new()) {
         error!("Error loading chainstate: {}", err);
         return Ok(());
@@ -502,5 +517,9 @@ async fn main() -> std::io::Result<()> {
         &context,
         shutdown_rx,
     )
-    .await
+    .await?;
+
+    unregister_validation_interface(&validation_interface, &context).unwrap();
+
+    Ok(())
 }
