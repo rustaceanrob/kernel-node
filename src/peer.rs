@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,11 +19,27 @@ use log::{debug, info};
 
 use crate::bitcoin_block_to_kernel_block;
 
+#[derive(Clone)]
+pub struct TipState {
+    pub block_hash: bitcoin::BlockHash,
+}
+
 pub struct NodeState {
-    pub best_block: bitcoin::BlockHash,
-    pub height: i32,
+    pub tip_state: Arc<Mutex<TipState>>,
     pub context: Arc<Context>,
     pub chainman: ChainstateManager,
+}
+
+impl NodeState {
+    pub fn set_tip_state(&self, block_hash: bitcoin::BlockHash) {
+        let mut state = self.tip_state.lock().unwrap();
+        state.block_hash = block_hash;
+    }
+
+    pub fn get_tip_state(&self) -> TipState {
+        let state = self.tip_state.lock().unwrap();
+        state.clone()
+    }
 }
 
 /// State Machine for setting up a connection and getting blocks from a peer
@@ -126,7 +142,7 @@ pub fn process_message(
                 }),
                 vec![create_version_message(
                     addrs[0].1.clone(),
-                    node_state.height,
+                    node_state.chainman.get_block_index_tip().height()
                 )],
             ),
             _ => panic!("This should be controlled by the user, so no way to reach here."),
@@ -145,9 +161,9 @@ pub fn process_message(
             };
             if handshake_state.got_ack && handshake_state.peer_height > 0 {
                 let mut messages = vec![NetworkMessage::Verack];
-                let our_height = node_state.height;
+                let our_height = node_state.chainman.get_block_index_tip().height();
                 if our_height < handshake_state.peer_height {
-                    let our_best = node_state.best_block;
+                    let our_best = node_state.get_tip_state().block_hash;
                     messages.push(create_getblocks_message(our_best));
                 }
                 debug!("Moving to AwaitingInv.");
@@ -194,15 +210,13 @@ pub fn process_message(
 
                 while let Some(next_block) = block_state
                     .block_buffer
-                    .remove(&node_state.best_block)
+                    .remove(&node_state.get_tip_state().block_hash)
                 {
                     debug!("Validating block: {}", next_block.block_hash());
                     node_state
                         .chainman
                         .process_block(&bitcoin_block_to_kernel_block(&next_block))
                         .unwrap();
-                    node_state.best_block = next_block.block_hash();
-                    node_state.height = node_state.chainman.get_block_index_tip().height();
                     debug!("Completed validating the block: {}", next_block.block_hash());
                 }
 
@@ -211,7 +225,7 @@ pub fn process_message(
                 // blocks.
                 if block_state.peer_inventory.is_empty() {
                     block_state.block_buffer.clear();
-                    let our_best = node_state.best_block;
+                    let our_best = node_state.get_tip_state().block_hash;
                     (
                         PeerStateMachine::AwaitingInv,
                         vec![create_getblocks_message(our_best)],

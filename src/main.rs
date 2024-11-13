@@ -4,8 +4,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Once,
+        atomic::{AtomicBool, Ordering}, Arc, Mutex, Once
     },
 };
 
@@ -23,16 +22,13 @@ use bitcoin::{
     BlockHash, Network,
 };
 use bitcoinkernel::{
-    register_validation_interface, unregister_validation_interface, BlockManagerOptions, ChainType,
-    ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder,
-    KernelNotificationInterfaceCallbackHolder, Log, Logger, SynchronizationState,
-    ValidationInterfaceCallbackHolder, ValidationInterfaceWrapper,
+    register_validation_interface, unregister_validation_interface, BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder, Log, Logger, SynchronizationState, ValidationInterfaceCallbackHolder, ValidationInterfaceWrapper, ValidationMode
 };
 use clap::Parser;
 use home::home_dir;
-use kernel_util::bitcoin_block_to_kernel_block;
+use kernel_util::{bitcoin_block_to_kernel_block, kernel_unowned_block_to_block};
 use log::{debug, error, info, warn};
-use peer::{process_message, NodeState, PeerStateMachine};
+use peer::{process_message, NodeState, PeerStateMachine, TipState};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{net::TcpStream, sync::broadcast};
 
@@ -83,16 +79,16 @@ fn create_context(chain_type: ChainType, shutdown_tx: broadcast::Sender<()>) -> 
             kn_block_tip: Box::new(|state, block_hash| {
                 let hash = BlockHash::from_byte_array(block_hash.hash);
                 match state {
-                    SynchronizationState::INIT_DOWNLOAD => info!("Received new block tip {} during IBD.", hash),
+                    SynchronizationState::INIT_DOWNLOAD => debug!("Received new block tip {} during IBD.", hash),
                     SynchronizationState::POST_INIT => info!("Received new block {}", hash),
-                    SynchronizationState::INIT_REINDEX => info!("Moved new block tip {} during reindex.", hash),
+                    SynchronizationState::INIT_REINDEX => debug!("Moved new block tip {} during reindex.", hash),
                 };
             }),
             kn_header_tip: Box::new(|state, height, timestamp, presync| {
                 match state {
-                    SynchronizationState::INIT_DOWNLOAD => info!("Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::INIT_DOWNLOAD => debug!("Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
                     SynchronizationState::POST_INIT => info!("Received new header tip at height {} and time {}. Presync mode: {}", height, timestamp, presync),
-                    SynchronizationState::INIT_REINDEX => info!("Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::INIT_REINDEX => debug!("Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
                 }
             }),
             kn_progress: Box::new(|title, progress, resume_possible| {
@@ -138,10 +134,18 @@ fn setup_logging() {
 }
 
 fn setup_validation_interface(node_state: &NodeState)-> ValidationInterfaceWrapper {
+    let tip_state_clone = Arc::clone(&node_state.tip_state);
     let validation_interface =
         ValidationInterfaceWrapper::new(Box::new(ValidationInterfaceCallbackHolder {
-            block_checked: Box::new(move |_block, _mode, _result| {
-                log::info!("got validation callback for successfully checking a block.");
+            block_checked: Box::new(move |block, mode, _result| {
+                match mode {
+                    ValidationMode::VALID => {
+                        let hash = kernel_unowned_block_to_block(block).block_hash();
+                        log::debug!("Validation interface: Successfully checked block: {}", hash);
+                        tip_state_clone.lock().unwrap().block_hash = hash;
+                    },
+                    _ => error!("Received an invalid block!"),
+                }
             }),
         }));
     register_validation_interface(&validation_interface, &node_state.context).unwrap();
@@ -284,7 +288,7 @@ async fn run_connection(
                         }
                     },
                     Err(e) => {
-                        info!("Error receiving message: {}", e);
+                        error!("Error receiving message: {}", e);
                         break;
                     }
                 }
@@ -322,9 +326,12 @@ async fn main() -> std::io::Result<()> {
     )
     .unwrap();
 
-    let mut node_state = NodeState {
-        best_block: BlockHash::all_zeros(),
-        height: 0,
+    let tip_state = Arc::new(Mutex::new(TipState {
+        block_hash: BlockHash::all_zeros(),
+    }));
+
+    let node_state = NodeState {
+        tip_state,
         chainman,
         context: Arc::clone(&context),
     };
@@ -341,11 +348,9 @@ async fn main() -> std::io::Result<()> {
     }
 
     let tip_index = node_state.chainman.get_block_index_tip();
-    let height = tip_index.height();
     let hash = tip_index.block_hash();
     drop(tip_index);
-    node_state.best_block = BlockHash::from_byte_array(hash.hash);
-    node_state.height = height;
+    node_state.set_tip_state(BlockHash::from_byte_array(hash.hash));
 
     info!("Bitcoin kernel initialized");
 
