@@ -213,10 +213,9 @@ pub fn process_message(
                     .remove(&node_state.get_tip_state().block_hash)
                 {
                     debug!("Validating block: {}", next_block.block_hash());
-                    node_state
+                    let (_accepted, _new_block) = node_state
                         .chainman
-                        .process_block(&bitcoin_block_to_kernel_block(&next_block))
-                        .unwrap();
+                        .process_block(&bitcoin_block_to_kernel_block(&next_block));
                     debug!("Completed validating the block: {}", next_block.block_hash());
                 }
 
