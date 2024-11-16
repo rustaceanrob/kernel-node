@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::Cursor,
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -13,12 +12,7 @@ mod peer;
 
 use crate::kernel_util::BitcoinNetwork;
 use bitcoin::{
-    consensus::{encode, Decodable},
     hashes::Hash,
-    p2p::{
-        message::{NetworkMessage, RawNetworkMessage},
-        Address, ServiceFlags,
-    },
     BlockHash, Network,
 };
 use bitcoinkernel::{
@@ -28,9 +22,8 @@ use clap::Parser;
 use home::home_dir;
 use kernel_util::{bitcoin_block_to_kernel_block, kernel_unowned_block_to_block};
 use log::{debug, error, info, warn};
-use peer::{process_message, NodeState, PeerStateMachine, TipState};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::{net::TcpStream, sync::broadcast};
+use peer::{BitcoinPeer, NodeState, TipState};
+use tokio::sync::broadcast;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -199,53 +192,7 @@ fn resolve_seeds(seeds: &[&str]) -> Vec<SocketAddr> {
     addresses
 }
 
-struct BitcoinPeer {
-    addr: Address,
-    stream: TcpStream,
-    network: Network,
-}
-
-impl BitcoinPeer {
-    async fn new(addr: SocketAddr, network: Network) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
-        Ok(BitcoinPeer {
-            addr: Address::new(&addr, ServiceFlags::WITNESS),
-            stream,
-            network,
-        })
-    }
-
-    async fn send_message(&mut self, msg: NetworkMessage) -> std::io::Result<()> {
-        let raw_msg = RawNetworkMessage::new(self.network.magic(), msg);
-        let bytes = encode::serialize(&raw_msg);
-        self.stream.write_all(&bytes).await?;
-        Ok(())
-    }
-
-    async fn receive_message(&mut self) -> std::io::Result<NetworkMessage> {
-        // First read the header, then the payload. Do this, because we cannot read all at once in an async context.
-        let mut header_buf = [0u8; 24];
-        self.stream.read_exact(&mut header_buf).await?;
-        let payload_len = u32::from_le_bytes([
-            header_buf[16],
-            header_buf[17],
-            header_buf[18],
-            header_buf[19],
-        ]) as usize;
-
-        let mut payload_buf = vec![0u8; payload_len];
-        self.stream.read_exact(&mut payload_buf).await?;
-
-        let raw_msg = RawNetworkMessage::consensus_decode(&mut Cursor::new(
-            [header_buf.as_slice(), payload_buf.as_slice()].concat(),
-        ))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(raw_msg.payload().clone())
-    }
-}
-
-async fn run_connection(
+async fn run(
     network: Network,
     connect: Option<SocketAddr>,
     mut node_state: NodeState,
@@ -257,40 +204,19 @@ async fn run_connection(
         let seeds = get_seeds(network);
         info!("These are the dns seeds we are going to use: {:?}", seeds);
         let addresses = resolve_seeds(seeds);
-        debug!("These are the resolved addresses from the dns seeds: {:?}", addresses);
+        info!("These are the resolved addresses from the dns seeds: {:?}", addresses);
         addresses[0]
     };
-    let mut peer = BitcoinPeer::new(addr, network).await?;
+    let mut peer = BitcoinPeer::new(addr, network, &mut node_state).await?;
     info!("Connected to peer");
-
-    // Initial handshake
-    let (mut peer_state_machine, mut messages) = process_message(
-        PeerStateMachine::StartConnection,
-        NetworkMessage::Addr(vec![(0, peer.addr.clone())]),
-        &mut node_state,
-    );
-    for message in messages.drain(..) {
-        peer.send_message(message).await.unwrap();
-    }
-
-    info!("Sent version message - starting event loop.");
-    debug!("Why aren't you printing?");
 
     tokio::select! {
         result = async {
             // Basic message handling loop
             loop {
-                match peer.receive_message().await {
-                    Ok(msg) => {
-                        (peer_state_machine, messages) = process_message(peer_state_machine, msg, &mut node_state);
-                        for message in messages.drain(..) {
-                            peer.send_message(message).await.unwrap();
-                        }
-                    },
-                    Err(e) => {
-                        error!("Error receiving message: {}", e);
-                        break;
-                    }
+                if let Err(e) = peer.process_message(&mut node_state).await {
+                    error!("Error processing message: {}", e);
+                    break;
                 }
             }
         } => result,
@@ -365,7 +291,7 @@ async fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    run_connection(
+    run(
         args.network.into(),
         connect,
         node_state,
