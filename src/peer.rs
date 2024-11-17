@@ -1,21 +1,20 @@
 use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    collections::{HashMap, HashSet}, fmt, io::Write, net::{SocketAddr, TcpStream}, sync::{mpsc, Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}
 };
 
 use bitcoin::{
-    consensus::{encode, Decodable}, hashes::Hash, io::Cursor, p2p::{
+    consensus::{encode, Decodable},
+    hashes::Hash,
+    p2p::{
         message::{NetworkMessage, RawNetworkMessage},
         message_blockdata::{GetBlocksMessage, Inventory},
         message_network::VersionMessage,
         Address, ServiceFlags,
-    }, Network
+    },
+    Network,
 };
 use bitcoinkernel::{ChainstateManager, Context};
 use log::{debug, info};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream};
 
 use crate::bitcoin_block_to_kernel_block;
 
@@ -25,9 +24,10 @@ pub struct TipState {
 }
 
 pub struct NodeState {
+    pub block_tx: mpsc::SyncSender<bitcoinkernel::Block>,
     pub tip_state: Arc<Mutex<TipState>>,
     pub context: Arc<Context>,
-    pub chainman: ChainstateManager,
+    pub chainman: Arc<ChainstateManager>,
 }
 
 impl NodeState {
@@ -54,7 +54,7 @@ impl NodeState {
 ///    Handshake -------- Verack, Version
 ///        |         ▲  |
 ///        │         |__|
-///        | 
+///        |
 ///        │ Verack +   
 ///        │ Version    
 ///        ▼            
@@ -87,7 +87,7 @@ pub struct Handshake {
 
 pub struct AwaitingBlock {
     pub peer_inventory: HashSet<bitcoin::BlockHash>,
-    pub block_buffer: HashMap<bitcoin::BlockHash /*prev */, bitcoin::Block>,
+    pub block_buffer: HashMap<bitcoin::BlockHash /*prev */, bitcoinkernel::Block>,
 }
 
 fn create_version_message(addr: Address, height: i32) -> NetworkMessage {
@@ -130,13 +130,13 @@ fn create_getdata_message(block_hashes: &Vec<bitcoin::BlockHash>) -> NetworkMess
 
 pub fn process_message(
     state_machine: PeerStateMachine,
-    event: NetworkMessage,
+    event: &NetworkMessage,
     node_state: &mut NodeState,
 ) -> (PeerStateMachine, Vec<NetworkMessage>) {
     // Always process the ping first as a special case.
     if let NetworkMessage::Ping(nonce) = event {
         info!("Received ping, responding pong.");
-        return (state_machine, vec![NetworkMessage::Pong(nonce)]);
+        return (state_machine, vec![NetworkMessage::Pong(nonce.clone())]);
     }
 
     match state_machine {
@@ -148,7 +148,7 @@ pub fn process_message(
                 }),
                 vec![create_version_message(
                     addrs[0].1.clone(),
-                    node_state.chainman.get_block_index_tip().height()
+                    node_state.chainman.get_block_index_tip().height(),
                 )],
             ),
             _ => panic!("This should be controlled by the user, so no way to reach here."),
@@ -212,17 +212,18 @@ pub fn process_message(
             NetworkMessage::Block(block) => {
                 let prev_blockhash = block.header.prev_blockhash;
                 block_state.peer_inventory.remove(&block.block_hash());
-                block_state.block_buffer.insert(prev_blockhash, block);
+                block_state
+                    .block_buffer
+                    .insert(prev_blockhash, bitcoin_block_to_kernel_block(&block));
 
                 while let Some(next_block) = block_state
                     .block_buffer
                     .remove(&node_state.get_tip_state().block_hash)
                 {
-                    debug!("Validating block: {}", next_block.block_hash());
-                    let (_accepted, _new_block) = node_state
-                        .chainman
-                        .process_block(&bitcoin_block_to_kernel_block(&next_block));
-                    debug!("Completed validating the block: {}", next_block.block_hash());
+                    if let Err(err) = node_state.block_tx.send(next_block) {
+                        debug!("Encountered error on block send: {}", err);
+                        return (PeerStateMachine::AwaitingBlock(block_state), vec![]);
+                    }
                 }
 
                 // If all to be expected blocks were received, clear any
@@ -249,20 +250,30 @@ pub fn process_message(
 
 pub struct BitcoinPeer {
     addr: Address,
-    stream: TcpStream,
+    pub stream: Arc<TcpStream>,
     network: Network,
     state_machine: PeerStateMachine,
 }
 
+impl fmt::Display for BitcoinPeer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self.addr)
+    }
+}
+
 impl BitcoinPeer {
-    pub async fn new(socket_addr: SocketAddr, network: Network, node_state: &mut NodeState) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(socket_addr).await?;
+    pub fn new(
+        socket_addr: SocketAddr,
+        network: Network,
+        node_state: &mut NodeState,
+    ) -> std::io::Result<Self> {
+        let stream = Arc::new(TcpStream::connect(socket_addr)?);
         let addr = Address::new(&socket_addr, ServiceFlags::WITNESS);
         info!("Connected to {:?}", addr);
 
         let (state_machine, mut messages) = process_message(
             PeerStateMachine::StartConnection,
-            NetworkMessage::Addr(vec![(0, addr.clone())]),
+            &NetworkMessage::Addr(vec![(0, addr.clone())]),
             node_state,
         );
         let mut peer = BitcoinPeer {
@@ -272,47 +283,52 @@ impl BitcoinPeer {
             state_machine,
         };
         for message in messages.drain(..) {
-            peer.send_message(message).await.unwrap();
+            peer.send_message(message).unwrap();
         }
         Ok(peer)
     }
 
-    pub async fn send_message(&mut self, msg: NetworkMessage) -> std::io::Result<()> {
+    pub fn send_message(&mut self, msg: NetworkMessage) -> std::io::Result<()> {
         let raw_msg = RawNetworkMessage::new(self.network.magic(), msg);
         let bytes = encode::serialize(&raw_msg);
-        self.stream.write_all(&bytes).await?;
+        (&*self.stream).write_all(&bytes)?;
         Ok(())
     }
 
-    async fn receive_message(&mut self) -> std::io::Result<NetworkMessage> {
-        // First read the header, then the payload. Do this, because we cannot read all at once in an async context.
-        let mut header_buf = [0u8; 24];
-        self.stream.read_exact(&mut header_buf).await?;
-        let payload_len = u32::from_le_bytes([
-            header_buf[16],
-            header_buf[17],
-            header_buf[18],
-            header_buf[19],
-        ]) as usize;
-
-        let mut payload_buf = vec![0u8; payload_len];
-        self.stream.read_exact(&mut payload_buf).await?;
-
-        let raw_msg = RawNetworkMessage::consensus_decode(&mut Cursor::new(
-            [header_buf.as_slice(), payload_buf.as_slice()].concat(),
-        ))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-        Ok(raw_msg.payload().clone())
+    fn receive_message(&mut self) -> std::io::Result<RawNetworkMessage> {
+        match RawNetworkMessage::consensus_decode(&mut (&*self.stream)) {
+            Ok(raw_msg) => Ok(raw_msg),
+            Err(bitcoin::consensus::encode::Error::Io(err)) => {
+                let io_err: std::io::Error = err.into();
+                if io_err.kind() == std::io::ErrorKind::ConnectionAborted
+                    || io_err.kind() == std::io::ErrorKind::BrokenPipe
+                    || io_err.kind() == std::io::ErrorKind::UnexpectedEof
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "Connection was shutdown",
+                    ));
+                }
+                Err(io_err)
+            }
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )),
+        }
     }
 
-    pub async fn process_message(&mut self, node_state: &mut NodeState) -> std::io::Result<()>{
-        let msg = self.receive_message().await?;
+    pub fn receive_and_process_message(
+        &mut self,
+        node_state: &mut NodeState,
+    ) -> std::io::Result<()> {
+        let msg = self.receive_message()?;
         let old_state = std::mem::take(&mut self.state_machine);
-        let (peer_state_machine, mut messages) = process_message(old_state, msg, node_state);
+        let (peer_state_machine, mut messages) =
+            process_message(old_state, msg.payload(), node_state);
         self.state_machine = peer_state_machine;
         for message in messages.drain(..) {
-            self.send_message(message).await?;
+            self.send_message(message)?;
         }
         Ok(())
     }

@@ -1,29 +1,32 @@
 use std::{
     fs,
-    net::SocketAddr,
+    net::{Shutdown, SocketAddr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering}, Arc, Mutex, Once
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, RecvTimeoutError},
+        Arc, Mutex, Once,
     },
+    thread,
+    time::Duration,
 };
 
 pub mod kernel_util;
 mod peer;
 
 use crate::kernel_util::BitcoinNetwork;
-use bitcoin::{
-    hashes::Hash,
-    BlockHash, Network,
-};
+use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
-    register_validation_interface, unregister_validation_interface, BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder, Log, Logger, SynchronizationState, ValidationInterfaceCallbackHolder, ValidationInterfaceWrapper, ValidationMode
+    register_validation_interface, unregister_validation_interface, BlockManagerOptions, ChainType,
+    ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder,
+    KernelNotificationInterfaceCallbackHolder, Log, Logger, SynchronizationState,
+    ValidationInterfaceCallbackHolder, ValidationInterfaceWrapper, ValidationMode,
 };
 use clap::Parser;
 use home::home_dir;
 use kernel_util::{bitcoin_block_to_kernel_block, kernel_unowned_block_to_block};
 use log::{debug, error, info, warn};
 use peer::{BitcoinPeer, NodeState, TipState};
-use tokio::sync::broadcast;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -62,7 +65,7 @@ impl Args {
     }
 }
 
-fn create_context(chain_type: ChainType, shutdown_tx: broadcast::Sender<()>) -> Arc<Context> {
+fn create_context(chain_type: ChainType, shutdown_tx: mpsc::Sender<()>) -> Arc<Context> {
     let shutdown_triggered = Arc::new(AtomicBool::new(false));
     let shutdown_triggered_clone = Arc::clone(&shutdown_triggered);
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -126,19 +129,17 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
-fn setup_validation_interface(node_state: &NodeState)-> ValidationInterfaceWrapper {
+fn setup_validation_interface(node_state: &NodeState) -> ValidationInterfaceWrapper {
     let tip_state_clone = Arc::clone(&node_state.tip_state);
     let validation_interface =
         ValidationInterfaceWrapper::new(Box::new(ValidationInterfaceCallbackHolder {
-            block_checked: Box::new(move |block, mode, _result| {
-                match mode {
-                    ValidationMode::VALID => {
-                        let hash = kernel_unowned_block_to_block(block).block_hash();
-                        log::debug!("Validation interface: Successfully checked block: {}", hash);
-                        tip_state_clone.lock().unwrap().block_hash = hash;
-                    },
-                    _ => error!("Received an invalid block!"),
+            block_checked: Box::new(move |block, mode, _result| match mode {
+                ValidationMode::VALID => {
+                    let hash = kernel_unowned_block_to_block(block).block_hash();
+                    log::debug!("Validation interface: Successfully checked block: {}", hash);
+                    tip_state_clone.lock().unwrap().block_hash = hash;
                 }
+                _ => error!("Received an invalid block!"),
             }),
         }));
     register_validation_interface(&validation_interface, &node_state.context).unwrap();
@@ -192,11 +193,12 @@ fn resolve_seeds(seeds: &[&str]) -> Vec<SocketAddr> {
     addresses
 }
 
-async fn run(
+fn run(
     network: Network,
     connect: Option<SocketAddr>,
     mut node_state: NodeState,
-    mut shutdown_rx: broadcast::Receiver<()>,
+    shutdown_rx: mpsc::Receiver<()>,
+    block_rx: mpsc::Receiver<bitcoinkernel::Block>,
 ) -> std::io::Result<()> {
     let addr = if let Some(addr) = connect {
         addr
@@ -204,59 +206,93 @@ async fn run(
         let seeds = get_seeds(network);
         info!("These are the dns seeds we are going to use: {:?}", seeds);
         let addresses = resolve_seeds(seeds);
-        info!("These are the resolved addresses from the dns seeds: {:?}", addresses);
+        info!(
+            "These are the resolved addresses from the dns seeds: {:?}",
+            addresses
+        );
         addresses[0]
     };
-    let mut peer = BitcoinPeer::new(addr, network, &mut node_state).await?;
+    let mut peer = BitcoinPeer::new(addr, network, &mut node_state)?;
     info!("Connected to peer");
 
-    tokio::select! {
-        result = async {
-            // Basic message handling loop
-            loop {
-                if let Err(e) = peer.process_message(&mut node_state).await {
-                    error!("Error processing message: {}", e);
-                    break;
+    let chainman = Arc::clone(&node_state.chainman);
+    let context = Arc::clone(&node_state.context);
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_peer = running.clone();
+    let running_block = running.clone();
+    let connection = Arc::clone(&peer.stream);
+
+    let peer_processing_handler = thread::spawn(move || {
+        while running_peer.load(Ordering::SeqCst) {
+            if let Err(e) = peer.receive_and_process_message(&mut node_state) {
+                if std::io::ErrorKind::ConnectionAborted == e.kind() {
+                    debug!("Error processing message: {}", e);
                 }
+                error!("Error processing message: {}", e);
+                break;
             }
-        } => result,
-        _ = tokio::signal::ctrl_c() => {
-            node_state.context.interrupt();
-            info!("Received interrupt signal, shutting down...");
-            return Ok(());
         }
-        _ = shutdown_rx.recv() => {
-            node_state.context.interrupt();
-            info!("Received shutdown signal, shutting down...");
-            return Ok(());
+        info!("stopping net processing thread.");
+    });
+
+    let block_processing_handler = thread::spawn(move || {
+        while running_block.load(Ordering::SeqCst) {
+            match block_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(block) => {
+                    debug!("Validating block.");
+                    let (_accepted, _new_block) = chainman.process_block(&block);
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
+        info!("Stopping block processing thread.");
+    });
+
+    if let Ok(()) = shutdown_rx.recv() {
+        context.interrupt();
+        info!("Received shutdown signal, shutting down...");
+        running.store(false, Ordering::SeqCst);
+        connection.shutdown(Shutdown::Read).unwrap();
     }
+
+    peer_processing_handler.join().unwrap();
+    block_processing_handler.join().unwrap();
+
     info!("exiting.");
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() {
     let args = Args::parse();
     START.call_once(|| {
         setup_logging();
     });
-    let (shutdown_tx, mut shutdown_rx) = broadcast::channel(32);
-    let context = create_context(args.network.into(), shutdown_tx);
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    let context = create_context(args.network.into(), shutdown_tx.clone());
+
+    ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
     let data_dir = args.get_data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
-    let chainman = ChainstateManager::new(
-        ChainstateManagerOptions::new(&context, &data_dir).unwrap(),
-        BlockManagerOptions::new(&context, &blocks_dir).unwrap(),
-        Arc::clone(&context)
-    )
-    .unwrap();
+    let chainman = Arc::new(
+        ChainstateManager::new(
+            ChainstateManagerOptions::new(&context, &data_dir).unwrap(),
+            BlockManagerOptions::new(&context, &blocks_dir).unwrap(),
+            Arc::clone(&context),
+        )
+        .unwrap(),
+    );
 
     let tip_state = Arc::new(Mutex::new(TipState {
         block_hash: BlockHash::all_zeros(),
     }));
 
+    let (block_tx, block_rx) = mpsc::sync_channel(1);
+
     let node_state = NodeState {
+        block_tx,
         tip_state,
         chainman,
         context: Arc::clone(&context),
@@ -264,13 +300,16 @@ async fn main() -> std::io::Result<()> {
 
     let validation_interface = setup_validation_interface(&node_state);
 
-    if let Err(err) = node_state.chainman.load_chainstate(ChainstateLoadOptions::new()) {
+    if let Err(err) = node_state
+        .chainman
+        .load_chainstate(ChainstateLoadOptions::new())
+    {
         error!("Error loading chainstate: {}", err);
-        return Ok(());
+        return;
     }
     if let Err(err) = node_state.chainman.import_blocks() {
         error!("Error importing blocks: {}", err);
-        return Ok(());
+        return;
     }
 
     let tip_index = node_state.chainman.get_block_index_tip();
@@ -288,7 +327,7 @@ async fn main() -> std::io::Result<()> {
 
     if shutdown_rx.try_recv().is_ok() {
         info!("Shutting down!");
-        return Ok(());
+        return;
     }
 
     run(
@@ -296,10 +335,9 @@ async fn main() -> std::io::Result<()> {
         connect,
         node_state,
         shutdown_rx,
+        block_rx,
     )
-    .await?;
+    .unwrap();
 
     unregister_validation_interface(&validation_interface, &context).unwrap();
-
-    Ok(())
 }
