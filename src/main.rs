@@ -224,19 +224,22 @@ fn run(
     let connection = Arc::clone(&peer.stream);
 
     let peer_processing_handler = thread::spawn(move || {
+        info!("Starting net processing thread.");
         while running_peer.load(Ordering::SeqCst) {
             if let Err(e) = peer.receive_and_process_message(&mut node_state) {
                 if std::io::ErrorKind::ConnectionAborted == e.kind() {
                     debug!("Error processing message: {}", e);
+                    break;
                 }
                 error!("Error processing message: {}", e);
                 break;
             }
         }
-        info!("stopping net processing thread.");
+        info!("Stopping net processing thread.");
     });
 
     let block_processing_handler = thread::spawn(move || {
+        info!("Starting block processing thread.");
         while running_block.load(Ordering::SeqCst) {
             match block_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(block) => {
