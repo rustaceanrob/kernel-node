@@ -24,7 +24,7 @@ use bitcoinkernel::{
 };
 use clap::Parser;
 use home::home_dir;
-use kernel_util::{bitcoin_block_to_kernel_block, kernel_unowned_block_to_block};
+use kernel_util::bitcoin_block_to_kernel_block;
 use log::{debug, error, info, warn};
 use peer::{BitcoinPeer, NodeState, TipState};
 
@@ -135,7 +135,7 @@ fn setup_validation_interface(node_state: &NodeState) -> ValidationInterfaceWrap
         ValidationInterfaceWrapper::new(Box::new(ValidationInterfaceCallbackHolder {
             block_checked: Box::new(move |block, mode, _result| match mode {
                 ValidationMode::VALID => {
-                    let hash = kernel_unowned_block_to_block(block).block_hash();
+                    let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
                     log::debug!("Validation interface: Successfully checked block: {}", hash);
                     tip_state_clone.lock().unwrap().block_hash = hash;
                 }
@@ -210,7 +210,7 @@ fn run(
             "These are the resolved addresses from the dns seeds: {:?}",
             addresses
         );
-        addresses[0]
+        addresses[1]
     };
     let mut peer = BitcoinPeer::new(addr, network, &mut node_state)?;
     info!("Connected to peer");
@@ -276,9 +276,11 @@ fn main() {
     ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
     let data_dir = args.get_data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
+    let chainman_opts = ChainstateManagerOptions::new(&context, &data_dir).unwrap();
+    chainman_opts.set_worker_threads(16);
     let chainman = Arc::new(
         ChainstateManager::new(
-            ChainstateManagerOptions::new(&context, &data_dir).unwrap(),
+            chainman_opts,
             BlockManagerOptions::new(&context, &blocks_dir).unwrap(),
             Arc::clone(&context),
         )
