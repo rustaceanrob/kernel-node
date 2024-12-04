@@ -1,5 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet}, fmt, io::Write, net::{SocketAddr, TcpStream}, sync::{mpsc, Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}
+    collections::{HashMap, HashSet},
+    fmt,
+    io::Write,
+    net::{SocketAddr, TcpStream},
+    sync::{mpsc, Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bitcoin::{

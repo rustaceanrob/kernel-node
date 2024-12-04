@@ -17,10 +17,9 @@ mod peer;
 use crate::kernel_util::BitcoinNetwork;
 use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
-    register_validation_interface, unregister_validation_interface, BlockManagerOptions, ChainType,
-    ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder,
-    KernelNotificationInterfaceCallbackHolder, Log, Logger, SynchronizationState,
-    ValidationInterfaceCallbackHolder, ValidationInterfaceWrapper, ValidationMode,
+    BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
+    ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
+    Log, Logger, SynchronizationState, ValidationInterfaceCallbackHolder, ValidationMode,
 };
 use clap::Parser;
 use home::home_dir;
@@ -65,7 +64,11 @@ impl Args {
     }
 }
 
-fn create_context(chain_type: ChainType, shutdown_tx: mpsc::Sender<()>) -> Arc<Context> {
+fn create_context(
+    chain_type: ChainType,
+    shutdown_tx: mpsc::Sender<()>,
+    tip_state: &Arc<Mutex<TipState>>,
+) -> Arc<Context> {
     let shutdown_triggered = Arc::new(AtomicBool::new(false));
     let shutdown_triggered_clone = Arc::clone(&shutdown_triggered);
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -105,6 +108,7 @@ fn create_context(chain_type: ChainType, shutdown_tx: mpsc::Sender<()>) -> Arc<C
                 }
             }),
         }))
+        .validation_interface(setup_validation_interface(tip_state))
         .build()
         .unwrap())
 }
@@ -129,21 +133,20 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
-fn setup_validation_interface(node_state: &NodeState) -> ValidationInterfaceWrapper {
-    let tip_state_clone = Arc::clone(&node_state.tip_state);
-    let validation_interface =
-        ValidationInterfaceWrapper::new(Box::new(ValidationInterfaceCallbackHolder {
-            block_checked: Box::new(move |block, mode, _result| match mode {
-                ValidationMode::VALID => {
-                    let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
-                    log::debug!("Validation interface: Successfully checked block: {}", hash);
-                    tip_state_clone.lock().unwrap().block_hash = hash;
-                }
-                _ => error!("Received an invalid block!"),
-            }),
-        }));
-    register_validation_interface(&validation_interface, &node_state.context).unwrap();
-    validation_interface
+fn setup_validation_interface(
+    tip_state: &Arc<Mutex<TipState>>,
+) -> Box<ValidationInterfaceCallbackHolder> {
+    let tip_state_clone = Arc::clone(&tip_state);
+    Box::new(ValidationInterfaceCallbackHolder {
+        block_checked: Box::new(move |block, mode, _result| match mode {
+            ValidationMode::VALID => {
+                let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
+                log::debug!("Validation interface: Successfully checked block: {}", hash);
+                tip_state_clone.lock().unwrap().block_hash = hash;
+            }
+            _ => error!("Received an invalid block!"),
+        }),
+    })
 }
 
 const SIGNET_SEEDS: &[&str] = &[
@@ -274,7 +277,11 @@ fn main() {
     });
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
-    let context = create_context(args.network.into(), shutdown_tx.clone());
+    let tip_state = Arc::new(Mutex::new(TipState {
+        block_hash: BlockHash::all_zeros(),
+    }));
+
+    let context = create_context(args.network.into(), shutdown_tx.clone(), &tip_state);
 
     ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
     let data_dir = args.get_data_dir();
@@ -290,10 +297,6 @@ fn main() {
         .unwrap(),
     );
 
-    let tip_state = Arc::new(Mutex::new(TipState {
-        block_hash: BlockHash::all_zeros(),
-    }));
-
     let (block_tx, block_rx) = mpsc::sync_channel(1);
 
     let node_state = NodeState {
@@ -302,8 +305,6 @@ fn main() {
         chainman,
         context: Arc::clone(&context),
     };
-
-    let validation_interface = setup_validation_interface(&node_state);
 
     if let Err(err) = node_state
         .chainman
@@ -343,6 +344,4 @@ fn main() {
         block_rx,
     )
     .unwrap();
-
-    unregister_validation_interface(&validation_interface, &context).unwrap();
 }
