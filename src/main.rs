@@ -292,6 +292,7 @@ fn main() {
         ChainstateManager::new(
             chainman_opts,
             BlockManagerOptions::new(&context, &blocks_dir).unwrap(),
+            ChainstateLoadOptions::new(),
             Arc::clone(&context),
         )
         .unwrap(),
@@ -306,13 +307,6 @@ fn main() {
         context: Arc::clone(&context),
     };
 
-    if let Err(err) = node_state
-        .chainman
-        .load_chainstate(ChainstateLoadOptions::new())
-    {
-        error!("Error loading chainstate: {}", err);
-        return;
-    }
     if let Err(err) = node_state.chainman.import_blocks() {
         error!("Error importing blocks: {}", err);
         return;
