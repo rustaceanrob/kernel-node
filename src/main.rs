@@ -17,9 +17,7 @@ mod peer;
 use crate::kernel_util::BitcoinNetwork;
 use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
-    BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
-    ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbackHolder,
-    Log, Logger, SynchronizationState, ValidationInterfaceCallbackHolder, ValidationMode,
+    BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbacks, Log, Logger, SynchronizationState, ValidationInterfaceCallbacks, ValidationMode
 };
 use clap::Parser;
 use home::home_dir;
@@ -74,7 +72,7 @@ fn create_context(
     let shutdown_tx_clone = shutdown_tx.clone();
     Arc::new(ContextBuilder::new()
         .chain_type(chain_type)
-        .kn_callbacks(Box::new(KernelNotificationInterfaceCallbackHolder {
+        .kn_callbacks(Box::new(KernelNotificationInterfaceCallbacks {
             kn_block_tip: Box::new(|state, block_hash| {
                 let hash = BlockHash::from_byte_array(block_hash.hash);
                 match state {
@@ -135,9 +133,9 @@ fn setup_logging() {
 
 fn setup_validation_interface(
     tip_state: &Arc<Mutex<TipState>>,
-) -> Box<ValidationInterfaceCallbackHolder> {
+) -> Box<ValidationInterfaceCallbacks> {
     let tip_state_clone = Arc::clone(&tip_state);
-    Box::new(ValidationInterfaceCallbackHolder {
+    Box::new(ValidationInterfaceCallbacks {
         block_checked: Box::new(move |block, mode, _result| match mode {
             ValidationMode::VALID => {
                 let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
