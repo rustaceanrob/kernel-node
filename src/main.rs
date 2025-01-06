@@ -7,7 +7,7 @@ use std::{
         mpsc::{self, RecvTimeoutError},
         Arc, Mutex, Once,
     },
-    thread,
+    thread::{self, available_parallelism},
     time::Duration,
 };
 
@@ -285,7 +285,7 @@ fn main() {
     let data_dir = args.get_data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman_opts = ChainstateManagerOptions::new(&context, &data_dir).unwrap();
-    chainman_opts.set_worker_threads(16);
+    chainman_opts.set_worker_threads(((available_parallelism().unwrap().get() / 2) + 1).try_into().unwrap());
     let chainman = Arc::new(
         ChainstateManager::new(
             chainman_opts,
