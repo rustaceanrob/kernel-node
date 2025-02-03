@@ -17,7 +17,9 @@ mod peer;
 use crate::kernel_util::BitcoinNetwork;
 use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
-    BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbacks, Log, Logger, SynchronizationState, ValidationInterfaceCallbacks, ValidationMode
+    BlockManagerOptions, ChainType, ChainstateLoadOptions, ChainstateManager,
+    ChainstateManagerOptions, Context, ContextBuilder, KernelNotificationInterfaceCallbacks, Log,
+    Logger, SynchronizationState, ValidationInterfaceCallbacks, ValidationMode,
 };
 use clap::Parser;
 use home::home_dir;
@@ -285,11 +287,15 @@ fn main() {
     let data_dir = args.get_data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman_opts = ChainstateManagerOptions::new(&context, &data_dir).unwrap();
-    chainman_opts.set_worker_threads(((available_parallelism().unwrap().get() / 2) + 1).try_into().unwrap());
+    chainman_opts.set_worker_threads(
+        ((available_parallelism().unwrap().get() / 2) + 1)
+            .try_into()
+            .unwrap(),
+    );
     let chainman = Arc::new(
         ChainstateManager::new(
             chainman_opts,
-            BlockManagerOptions::new(&context, &blocks_dir).unwrap(),
+            BlockManagerOptions::new(&context, &data_dir, &blocks_dir).unwrap(),
             ChainstateLoadOptions::new(),
             Arc::clone(&context),
         )

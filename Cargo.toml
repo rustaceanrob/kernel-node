@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"]}
-# bitcoinkernel = { path = "../rust-bitcoinkernel", version = "0.0.8" }
-bitcoinkernel = "0.0.13"
+# bitcoinkernel = { path = "../rust-bitcoinkernel", version = "0.0.14" }
+bitcoinkernel = "0.0.14"
 env_logger = "0.10"
 bitcoin = "0.32.4"
 home = "0.5"
