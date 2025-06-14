@@ -75,7 +75,7 @@ fn create_context(
     Arc::new(ContextBuilder::new()
         .chain_type(chain_type)
         .kn_callbacks(Box::new(KernelNotificationInterfaceCallbacks {
-            kn_block_tip: Box::new(|state, block_hash| {
+            kn_block_tip: Box::new(|state, block_hash, _| {
                 let hash = BlockHash::from_byte_array(block_hash.hash);
                 match state {
                     SynchronizationState::INIT_DOWNLOAD => debug!("Received new block tip {} during IBD.", hash),
