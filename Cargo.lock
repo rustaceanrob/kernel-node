@@ -152,9 +152,9 @@ dependencies = [
 
 [[package]]
 name = "bitcoinkernel"
-version = "0.0.21"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96ac91a2d5dc8601db1aaf29fd578b14a15f1b603b08ae54370b0363d1cd5092"
+checksum = "490df0bc5e775bbd3da26d064239d9ff7b94426106294fdea543a0cfe1561ce4"
 dependencies = [
  "libbitcoinkernel-sys",
 ]
@@ -383,9 +383,9 @@ dependencies = [
 
 [[package]]
 name = "libbitcoinkernel-sys"
-version = "0.0.20"
+version = "0.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "167a603d49bcb1b791cc45b7fa35f0ac7489f1a1f458a9048325462f39cc44a2"
+checksum = "b61dba860fb10b86ccf19f433e125d3da6c84a2b78c3dd0b25ac037e62cb361c"
 dependencies = [
  "bindgen",
  "cc",
