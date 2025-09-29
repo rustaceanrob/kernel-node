@@ -1,8 +1,4 @@
-use bitcoin::{
-    consensus::{deserialize, encode},
-    hashes::Hash,
-    Network,
-};
+use bitcoin::{consensus::encode, hashes::Hash, Network};
 use bitcoinkernel::{BlockTreeEntry, ChainType};
 use clap::ValueEnum;
 
