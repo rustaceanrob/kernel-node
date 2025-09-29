@@ -3,7 +3,7 @@ use bitcoin::{
     hashes::Hash,
     Network,
 };
-use bitcoinkernel::{BlockIndex, ChainType};
+use bitcoinkernel::{BlockTreeEntry, ChainType};
 use clap::ValueEnum;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -28,10 +28,10 @@ impl From<BitcoinNetwork> for bitcoin::Network {
 impl From<BitcoinNetwork> for ChainType {
     fn from(network: BitcoinNetwork) -> Self {
         match network {
-            BitcoinNetwork::Mainnet => ChainType::MAINNET,
-            BitcoinNetwork::Testnet => ChainType::TESTNET,
-            BitcoinNetwork::Signet => ChainType::SIGNET,
-            BitcoinNetwork::Regtest => ChainType::REGTEST,
+            BitcoinNetwork::Mainnet => ChainType::Mainnet,
+            BitcoinNetwork::Testnet => ChainType::Testnet,
+            BitcoinNetwork::Signet => ChainType::Signet,
+            BitcoinNetwork::Regtest => ChainType::Regtest,
         }
     }
 }
@@ -41,11 +41,6 @@ pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::B
     bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
 }
 
-pub fn kernel_unowned_block_to_block(block: bitcoinkernel::UnownedBlock) -> bitcoin::Block {
-    let ser_block: Vec<u8> = block.into();
-    deserialize(&ser_block).unwrap()
-}
-
-pub fn get_block_hash(index: BlockIndex) -> bitcoin::BlockHash {
-    bitcoin::BlockHash::from_byte_array(index.block_hash().hash)
+pub fn get_block_hash(index: BlockTreeEntry) -> bitcoin::BlockHash {
+    bitcoin::BlockHash::from_byte_array(index.block_hash().into())
 }

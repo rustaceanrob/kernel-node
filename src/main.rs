@@ -17,9 +17,8 @@ mod peer;
 use crate::kernel_util::BitcoinNetwork;
 use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
-    ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder,
-    KernelNotificationInterfaceCallbacks, Log, Logger, SynchronizationState,
-    ValidationInterfaceCallbacks, ValidationMode,
+    ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
+    SynchronizationState, ValidationMode,
 };
 use clap::Parser;
 use home::home_dir;
@@ -72,43 +71,52 @@ fn create_context(
     let shutdown_triggered = Arc::new(AtomicBool::new(false));
     let shutdown_triggered_clone = Arc::clone(&shutdown_triggered);
     let shutdown_tx_clone = shutdown_tx.clone();
+    let tip_state_clone = tip_state.clone();
     Arc::new(ContextBuilder::new()
         .chain_type(chain_type)
-        .kn_callbacks(Box::new(KernelNotificationInterfaceCallbacks {
-            kn_block_tip: Box::new(|state, block_hash, _| {
-                let hash = BlockHash::from_byte_array(block_hash.hash);
+        .with_block_tip_notification(|state, hash: bitcoinkernel::BlockHash, _| {
+                let hash = BlockHash::from_byte_array(hash.into());
                 match state {
-                    SynchronizationState::INIT_DOWNLOAD => debug!("Received new block tip {} during IBD.", hash),
-                    SynchronizationState::POST_INIT => info!("Received new block {}", hash),
-                    SynchronizationState::INIT_REINDEX => debug!("Moved new block tip {} during reindex.", hash),
+                    SynchronizationState::InitDownload => debug!("Received new block tip {} during IBD.", hash),
+                    SynchronizationState::PostInit => info!("Received new block {}", hash),
+                    SynchronizationState::InitReindex => debug!("Moved new block tip {} during reindex.", hash),
                 };
-            }),
-            kn_header_tip: Box::new(|state, height, timestamp, presync| {
+        })
+        .with_header_tip_notification(|state, height, timestamp, presync| {
                 match state {
-                    SynchronizationState::INIT_DOWNLOAD => debug!("Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
-                    SynchronizationState::POST_INIT => info!("Received new header tip at height {} and time {}. Presync mode: {}", height, timestamp, presync),
-                    SynchronizationState::INIT_REINDEX => debug!("Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::InitDownload => debug!("Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::PostInit => info!("Received new header tip at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::InitReindex => debug!("Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
                 }
-            }),
-            kn_progress: Box::new(|title, progress, resume_possible| {
+        })
+        .with_progress_notification(|title, progress, resume_possible| {
                 warn!("Made progress {}: {}. Can resume: {}", title, progress, resume_possible)
-            }),
-            kn_warning_set: Box::new(|_warning, _message| {}),
-            kn_warning_unset: Box::new(|_warning| {}),
-            kn_flush_error: Box::new(move |message| {
+        })
+        .with_warning_set_notification(|_warning, _message| {})
+        .with_warning_unset_notification(|_warning| {})
+        .with_flush_error_notification(move |message| {
                 if !shutdown_triggered.swap(true, Ordering::SeqCst) {
                     shutdown_tx.send(()).expect("failed to send shutdown signal");
                 }
                 error!("Fatal flush error encountered: {}", message);
-            }),
-            kn_fatal_error: Box::new(move |message| {
+        })
+        .with_fatal_error_notification(move |message| {
                 error!("Fatal error encountered: {}", message);
                 if !shutdown_triggered_clone.swap(true, Ordering::SeqCst) {
                     shutdown_tx_clone.send(()).expect("failed to send shutdown signal");
                 }
-            }),
-        }))
-        .validation_interface(setup_validation_interface(tip_state))
+        })
+        // .with_block_checked_validation(setup_validation_interface(tip_state))
+        .with_block_checked_validation(move |block: bitcoinkernel::Block, mode, _result| {
+            match mode {
+                ValidationMode::Valid => {
+                    let hash = bitcoin::BlockHash::from_byte_array(block.hash().into());
+                    log::debug!("Validation interface: Successfully checked block: {}", hash);
+                    tip_state_clone.lock().unwrap().block_hash = hash;
+                }
+                _ => error!("Received an invalid block!"),
+            }
+        })
         .build()
         .unwrap())
 }
@@ -124,7 +132,7 @@ impl Log for KernelLog {
 }
 
 static START: Once = Once::new();
-static mut GLOBAL_LOG_CALLBACK_HOLDER: Option<Logger<KernelLog>> = None;
+static mut GLOBAL_LOG_CALLBACK_HOLDER: Option<Logger> = None;
 
 fn setup_logging() {
     let mut builder = env_logger::Builder::from_default_env();
@@ -133,21 +141,21 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
-fn setup_validation_interface(
-    tip_state: &Arc<Mutex<TipState>>,
-) -> Box<ValidationInterfaceCallbacks> {
-    let tip_state_clone = Arc::clone(&tip_state);
-    Box::new(ValidationInterfaceCallbacks {
-        block_checked: Box::new(move |block, mode, _result| match mode {
-            ValidationMode::VALID => {
-                let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
-                log::debug!("Validation interface: Successfully checked block: {}", hash);
-                tip_state_clone.lock().unwrap().block_hash = hash;
-            }
-            _ => error!("Received an invalid block!"),
-        }),
-    })
-}
+// fn setup_validation_interface(
+//     tip_state: &Arc<Mutex<TipState>>,
+// ) -> Box<ValidationInterfaceCallbacks> {
+//     let tip_state_clone = Arc::clone(&tip_state);
+//     Box::new(ValidationInterfaceCallbacks {
+//         block_checked: Box::new(move |block, mode, _result| match mode {
+//             ValidationMode::Valid => {
+//                 let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
+//                 log::debug!("Validation interface: Successfully checked block: {}", hash);
+//                 tip_state_clone.lock().unwrap().block_hash = hash;
+//             }
+//             _ => error!("Received an invalid block!"),
+//         }),
+//     })
+// }
 
 const SIGNET_SEEDS: &[&str] = &[
     "seed.signet.bitcoin.sprovoost.nl.",
@@ -257,7 +265,7 @@ fn run(
     });
 
     if let Ok(()) = shutdown_rx.recv() {
-        context.interrupt();
+        context.interrupt().unwrap();
         info!("Received shutdown signal, shutting down...");
         running.store(false, Ordering::SeqCst);
         connection.shutdown(Shutdown::Read).unwrap();
@@ -292,7 +300,7 @@ fn main() {
             .try_into()
             .unwrap(),
     );
-    let chainman = Arc::new(ChainstateManager::new(chainman_opts, Arc::clone(&context)).unwrap());
+    let chainman = Arc::new(ChainstateManager::new(chainman_opts).unwrap());
 
     let (block_tx, block_rx) = mpsc::sync_channel(1);
 
@@ -308,10 +316,9 @@ fn main() {
         return;
     }
 
-    let tip_index = node_state.chainman.get_block_index_tip();
+    let tip_index = node_state.chainman.active_chain().tip();
     let hash = tip_index.block_hash();
-    drop(tip_index);
-    node_state.set_tip_state(BlockHash::from_byte_array(hash.hash));
+    node_state.set_tip_state(BlockHash::from_byte_array(hash.into()));
 
     info!("Bitcoin kernel initialized");
 

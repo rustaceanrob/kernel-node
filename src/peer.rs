@@ -153,7 +153,7 @@ pub fn process_message(
                 }),
                 vec![create_version_message(
                     addrs[0].1.clone(),
-                    node_state.chainman.get_block_index_tip().height(),
+                    node_state.chainman.active_chain().height(),
                 )],
             ),
             _ => panic!("This should be controlled by the user, so no way to reach here."),
@@ -172,7 +172,7 @@ pub fn process_message(
             };
             if handshake_state.got_ack && handshake_state.peer_height > 0 {
                 let mut messages = vec![NetworkMessage::Verack];
-                let our_height = node_state.chainman.get_block_index_tip().height();
+                let our_height = node_state.chainman.active_chain().height();
                 if our_height < handshake_state.peer_height {
                     let our_best = node_state.get_tip_state().block_hash;
                     messages.push(create_getblocks_message(our_best));
