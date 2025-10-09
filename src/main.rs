@@ -1,6 +1,6 @@
 use std::{
     fs,
-    net::{Shutdown, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -24,6 +24,7 @@ use clap::Parser;
 use home::home_dir;
 use kernel_util::bitcoin_block_to_kernel_block;
 use log::{debug, error, info, warn};
+use p2p::{dns::DnsQueryExt, p2p::NetworkExt};
 use peer::{BitcoinPeer, NodeState, TipState};
 
 #[derive(Parser, Debug)]
@@ -157,51 +158,12 @@ fn setup_logging() {
 //     })
 // }
 
-const SIGNET_SEEDS: &[&str] = &[
-    "seed.signet.bitcoin.sprovoost.nl.",
-    "seed.signet.achownodes.xyz.",
-];
-
-const MAINNET_SEEDS: &[&str] = &[
-    "seed.bitcoin.sipa.be.",
-    "dnsseed.bluematt.me.",
-    "dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us.",
-    "seed.bitcoin.jonasschnelli.ch.",
-    "seed.btc.petertodd.net.",
-    "seed.bitcoin.sprovoost.nl.",
-    "dnsseed.emzy.de.",
-    "seed.bitcoin.wiz.biz.",
-    "seed.mainnet.achownodes.xyz.",
-];
-
-const TESTNET_SEEDS: &[&str] = &[
-    "testnet-seed.bitcoin.jonasschnelli.ch.",
-    "seed.tbtc.petertodd.net.",
-    "seed.testnet.bitcoin.sprovoost.nl.",
-    "testnet-seed.bluematt.me.",
-    "seed.testnet.achownodes.xyz.",
-];
-
-fn get_seeds(network: Network) -> &'static [&'static str] {
-    match network {
-        Network::Bitcoin => MAINNET_SEEDS,
-        Network::Testnet(bitcoin::TestnetVersion::V3) => TESTNET_SEEDS,
-        Network::Signet => SIGNET_SEEDS,
-        Network::Regtest => panic!("Regtest does not support seed nodes, use -connect instead"),
-        _ => panic!("not supported."),
-    }
-}
-
-fn resolve_seeds(seeds: &[&str]) -> Vec<SocketAddr> {
-    let mut addresses = Vec::new();
-    for seed in seeds {
-        if let Ok(ips) = dns_lookup::lookup_host(seed) {
-            for ip in ips {
-                addresses.push(SocketAddr::new(ip, 38333));
-            }
-        }
-    }
-    addresses
+fn resolve_seeds(network: Network) -> Vec<SocketAddr> {
+    network
+        .query_dns_seeds(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53))
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, network.default_p2p_port()))
+        .collect()
 }
 
 fn run(
@@ -214,9 +176,7 @@ fn run(
     let addr = if let Some(addr) = connect {
         addr
     } else {
-        let seeds = get_seeds(network);
-        info!("These are the dns seeds we are going to use: {:?}", seeds);
-        let addresses = resolve_seeds(seeds);
+        let addresses = resolve_seeds(network);
         info!(
             "These are the resolved addresses from the dns seeds: {:?}",
             addresses
