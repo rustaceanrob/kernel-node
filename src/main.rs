@@ -1,6 +1,6 @@
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -15,7 +15,7 @@ pub mod kernel_util;
 mod peer;
 
 use crate::kernel_util::BitcoinNetwork;
-use bitcoin::{BlockHash, Network};
+use bitcoin::{key::rand::{seq::SliceRandom, thread_rng}, BlockHash, Network};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
@@ -181,7 +181,8 @@ fn run(
             "These are the resolved addresses from the dns seeds: {:?}",
             addresses
         );
-        addresses[1]
+        let mut rng = thread_rng();
+        addresses.choose(&mut rng).copied().unwrap()
     };
     let mut peer = BitcoinPeer::new(addr, network, &mut node_state)?;
     info!("Connected to peer");
@@ -192,7 +193,6 @@ fn run(
     let running = Arc::new(AtomicBool::new(true));
     let running_peer = running.clone();
     let running_block = running.clone();
-    let connection = Arc::clone(&peer.stream);
 
     let peer_processing_handler = thread::spawn(move || {
         info!("Starting net processing thread.");
@@ -228,7 +228,6 @@ fn run(
         context.interrupt().unwrap();
         info!("Received shutdown signal, shutting down...");
         running.store(false, Ordering::SeqCst);
-        connection.shutdown(Shutdown::Read).unwrap();
     }
 
     peer_processing_handler.join().unwrap();
