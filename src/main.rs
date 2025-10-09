@@ -15,7 +15,7 @@ pub mod kernel_util;
 mod peer;
 
 use crate::kernel_util::BitcoinNetwork;
-use bitcoin::{hashes::Hash, BlockHash, Network};
+use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
@@ -185,7 +185,7 @@ const TESTNET_SEEDS: &[&str] = &[
 fn get_seeds(network: Network) -> &'static [&'static str] {
     match network {
         Network::Bitcoin => MAINNET_SEEDS,
-        Network::Testnet => TESTNET_SEEDS,
+        Network::Testnet(bitcoin::TestnetVersion::V3) => TESTNET_SEEDS,
         Network::Signet => SIGNET_SEEDS,
         Network::Regtest => panic!("Regtest does not support seed nodes, use -connect instead"),
         _ => panic!("not supported."),
@@ -286,7 +286,7 @@ fn main() {
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
     let tip_state = Arc::new(Mutex::new(TipState {
-        block_hash: BlockHash::all_zeros(),
+        block_hash: BlockHash::GENESIS_PREVIOUS_BLOCK_HASH,
     }));
 
     let context = create_context(args.network.into(), shutdown_tx.clone(), &tip_state);
@@ -322,11 +322,7 @@ fn main() {
 
     info!("Bitcoin kernel initialized");
 
-    let connect: Option<SocketAddr> = if let Some(connect) = args.connect {
-        Some(connect.parse().unwrap())
-    } else {
-        None
-    };
+    let connect: Option<SocketAddr> = args.connect.map(|sock| sock.parse().unwrap());
 
     if shutdown_rx.try_recv().is_ok() {
         info!("Shutting down!");

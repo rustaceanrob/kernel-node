@@ -1,27 +1,34 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    io::Write,
+    io::{Read, Write},
     net::{SocketAddr, TcpStream},
+    ops::Deref,
     sync::{mpsc, Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bitcoin::{
-    consensus::{encode, Decodable},
-    hashes::Hash,
-    p2p::{
-        message::{NetworkMessage, RawNetworkMessage},
-        message_blockdata::{GetBlocksMessage, Inventory},
-        message_network::VersionMessage,
-        Address, ServiceFlags,
-    },
-    Network,
+use bitcoin::{absolute::Decodable, consensus::encode};
+
+use bitcoin::Network;
+use bitcoin_messages::{
+    message::{NetworkMessage, RawNetworkMessage},
+    message_blockdata::{GetBlocksMessage, Inventory},
+    message_network::VersionMessage,
+    Address, ServiceFlags,
 };
 use bitcoinkernel::{ChainstateManager, Context};
 use log::{debug, info};
+use p2p::p2p::{
+    self as bitcoin_messages,
+    message::{InventoryPayload, V1MessageHeader},
+    message_network::UserAgent,
+    NetworkExt, ProtocolVersion,
+};
 
 use crate::bitcoin_block_to_kernel_block;
+
+const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::INVALID_CB_NO_BAN_VERSION;
 
 #[derive(Clone)]
 pub struct TipState {
@@ -72,17 +79,13 @@ impl NodeState {
 ///       │ │
 ///       └─┘
 ///      Block
+#[derive(Default)]
 pub enum PeerStateMachine {
+    #[default]
     StartConnection,
     Handshake(Handshake),
     AwaitingInv,
     AwaitingBlock(AwaitingBlock),
-}
-
-impl Default for PeerStateMachine {
-    fn default() -> Self {
-        PeerStateMachine::StartConnection
-    }
 }
 
 pub struct Handshake {
@@ -101,47 +104,47 @@ fn create_version_message(addr: Address, height: i32) -> NetworkMessage {
         .unwrap()
         .as_secs() as i64;
 
-    let mut version_message = VersionMessage::new(
+    let version_message = VersionMessage::new(
+        PROTOCOL_VERSION,
         ServiceFlags::WITNESS,
         timestamp,
         addr,
         // addr_from is unused.
         Address::new(&SocketAddr::from(([0, 0, 0, 0], 0)), ServiceFlags::NONE),
         0,
-        "kernel-node".to_string(),
+        UserAgent::from_nonstandard("kernel-node"),
         height,
     );
-    version_message.version = 70015;
 
     NetworkMessage::Version(version_message)
 }
 
 fn create_getblocks_message(known_block_hash: bitcoin::BlockHash) -> NetworkMessage {
     NetworkMessage::GetBlocks(GetBlocksMessage {
-        version: 70015,
+        version: PROTOCOL_VERSION,
         locator_hashes: vec![known_block_hash],
-        stop_hash: bitcoin::BlockHash::all_zeros(),
+        stop_hash: bitcoin::BlockHash::GENESIS_PREVIOUS_BLOCK_HASH,
     })
 }
 
-fn create_getdata_message(block_hashes: &Vec<bitcoin::BlockHash>) -> NetworkMessage {
+fn create_getdata_message(block_hashes: &[bitcoin::BlockHash]) -> NetworkMessage {
     let inventory: Vec<Inventory> = block_hashes
-        .into_iter()
-        .map(|hash| Inventory::WitnessBlock(hash.clone()))
+        .iter()
+        .map(|hash| Inventory::WitnessBlock(*hash))
         .collect();
 
-    NetworkMessage::GetData(inventory)
+    NetworkMessage::GetData(InventoryPayload(inventory))
 }
 
 pub fn process_message(
     state_machine: PeerStateMachine,
-    event: &NetworkMessage,
+    event: NetworkMessage,
     node_state: &mut NodeState,
 ) -> (PeerStateMachine, Vec<NetworkMessage>) {
     // Always process the ping first as a special case.
     if let NetworkMessage::Ping(nonce) = event {
         info!("Received ping, responding pong.");
-        return (state_machine, vec![NetworkMessage::Pong(nonce.clone())]);
+        return (state_machine, vec![NetworkMessage::Pong(nonce)]);
     }
 
     match state_machine {
@@ -152,7 +155,7 @@ pub fn process_message(
                     peer_height: 0,
                 }),
                 vec![create_version_message(
-                    addrs[0].1.clone(),
+                    addrs.0[0].1.clone(),
                     node_state.chainman.active_chain().height(),
                 )],
             ),
@@ -186,8 +189,9 @@ pub fn process_message(
         }
         PeerStateMachine::AwaitingInv => match event {
             NetworkMessage::Inv(inventory) => {
-                debug!("Received inventory with {} items", inventory.len());
+                debug!("Received inventory with {} items", inventory.0.len());
                 let block_hashes: Vec<bitcoin::BlockHash> = inventory
+                    .0
                     .iter()
                     .filter_map(|inv| match inv {
                         Inventory::Block(hash) => Some(*hash),
@@ -215,7 +219,8 @@ pub fn process_message(
         },
         PeerStateMachine::AwaitingBlock(mut block_state) => match event {
             NetworkMessage::Block(block) => {
-                let prev_blockhash = block.header.prev_blockhash;
+                let block = block.assume_checked(None);
+                let prev_blockhash = block.header().prev_blockhash;
                 block_state.peer_inventory.remove(&block.block_hash());
                 block_state
                     .block_buffer
@@ -278,7 +283,10 @@ impl BitcoinPeer {
 
         let (state_machine, mut messages) = process_message(
             PeerStateMachine::StartConnection,
-            &NetworkMessage::Addr(vec![(0, addr.clone())]),
+            NetworkMessage::Addr(bitcoin_messages::message::AddrPayload(vec![(
+                0,
+                addr.clone(),
+            )])),
             node_state,
         );
         let mut peer = BitcoinPeer {
@@ -294,14 +302,20 @@ impl BitcoinPeer {
     }
 
     pub fn send_message(&mut self, msg: NetworkMessage) -> std::io::Result<()> {
-        let raw_msg = RawNetworkMessage::new(self.network.magic(), msg);
+        let raw_msg = RawNetworkMessage::new(self.network.default_network_magic(), msg);
         let bytes = encode::serialize(&raw_msg);
         (&*self.stream).write_all(&bytes)?;
         Ok(())
     }
 
     fn receive_message(&mut self) -> std::io::Result<RawNetworkMessage> {
-        match RawNetworkMessage::consensus_decode(&mut (&*self.stream)) {
+        let mut message = vec![0; 24];
+        self.stream.deref().read_exact(&mut message)?;
+        let message_header = V1MessageHeader::consensus_decode(&mut message.as_slice()).unwrap();
+        let mut rest = vec![0; message_header.length as usize];
+        self.stream.deref().read_exact(&mut rest)?;
+        message.extend(rest);
+        match RawNetworkMessage::consensus_decode(&mut message.as_slice()) {
             Ok(raw_msg) => Ok(raw_msg),
             Err(bitcoin::consensus::encode::Error::Io(err)) => {
                 let io_err: std::io::Error = err.into();
@@ -330,7 +344,7 @@ impl BitcoinPeer {
         let msg = self.receive_message()?;
         let old_state = std::mem::take(&mut self.state_machine);
         let (peer_state_machine, mut messages) =
-            process_message(old_state, msg.payload(), node_state);
+            process_message(old_state, msg.into_payload(), node_state);
         self.state_machine = peer_state_machine;
         for message in messages.drain(..) {
             self.send_message(message)?;
