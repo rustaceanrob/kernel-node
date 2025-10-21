@@ -1,4 +1,4 @@
-use bitcoin::{consensus::encode, hashes::Hash, Network};
+use bitcoin::{block::Checked, consensus::encode, Network, TestnetVersion};
 use bitcoinkernel::{BlockTreeEntry, ChainType};
 use clap::ValueEnum;
 
@@ -14,7 +14,7 @@ impl From<BitcoinNetwork> for bitcoin::Network {
     fn from(network: BitcoinNetwork) -> Self {
         match network {
             BitcoinNetwork::Mainnet => Network::Bitcoin,
-            BitcoinNetwork::Testnet => Network::Testnet,
+            BitcoinNetwork::Testnet => Network::Testnet(TestnetVersion::V3),
             BitcoinNetwork::Signet => Network::Signet,
             BitcoinNetwork::Regtest => Network::Regtest,
         }
@@ -32,7 +32,7 @@ impl From<BitcoinNetwork> for ChainType {
     }
 }
 
-pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::Block {
+pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block<Checked>) -> bitcoinkernel::Block {
     let ser_block = encode::serialize(block);
     bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
 }
