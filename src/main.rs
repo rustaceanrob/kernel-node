@@ -187,7 +187,7 @@ fn run(
         let mut rng = thread_rng();
         addresses.choose(&mut rng).copied().unwrap()
     };
-    let mut peer = BitcoinPeer::new(addr, network, &mut node_state)?;
+    let mut peer = BitcoinPeer::new(addr, network, &mut node_state).unwrap();
     let writer = peer.writer();
     info!("Connected to peer");
 
@@ -202,11 +202,14 @@ fn run(
         info!("Starting net processing thread.");
         while running_peer.load(Ordering::SeqCst) {
             if let Err(e) = peer.receive_and_process_message(&mut node_state) {
-                if std::io::ErrorKind::ConnectionAborted == e.kind() {
-                    debug!("Error processing message: {}", e);
-                    break;
+                match e {
+                    p2p::net::Error::Io(io) => {
+                        if io.kind() != std::io::ErrorKind::UnexpectedEof {
+                            error!("Unexpected I/O error: {}", io);
+                        }
+                    }
+                    e => error!("Error processing message: {e}"),
                 }
-                error!("Error processing message: {}", e);
                 break;
             }
         }
