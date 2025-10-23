@@ -175,7 +175,7 @@ pub fn process_message(
 
 pub struct BitcoinPeer {
     addr: Address,
-    writer: ConnectionWriter,
+    writer: Arc<ConnectionWriter>,
     reader: ConnectionReader,
     state_machine: PeerStateMachine,
 }
@@ -208,7 +208,7 @@ impl BitcoinPeer {
         let state_machine = PeerStateMachine::AwaitingInv;
         let peer = BitcoinPeer {
             addr,
-            writer,
+            writer: Arc::new(writer),
             reader,
             state_machine,
         };
@@ -216,6 +216,10 @@ impl BitcoinPeer {
         let getblocks = create_getblocks_message(our_best);
         peer.send_message(getblocks).unwrap();
         Ok(peer)
+    }
+
+    pub fn writer(&self) -> Arc<ConnectionWriter> {
+        Arc::clone(&self.writer) 
     }
 
     pub fn send_message(&self, msg: NetworkMessage) -> std::io::Result<()> {

@@ -188,6 +188,7 @@ fn run(
         addresses.choose(&mut rng).copied().unwrap()
     };
     let mut peer = BitcoinPeer::new(addr, network, &mut node_state)?;
+    let writer = peer.writer();
     info!("Connected to peer");
 
     let chainman = Arc::clone(&node_state.chainman);
@@ -229,6 +230,7 @@ fn run(
 
     if let Ok(()) = shutdown_rx.recv() {
         context.interrupt().unwrap();
+        let _ = writer.shutdown();
         info!("Received shutdown signal, shutting down...");
         running.store(false, Ordering::SeqCst);
     }
