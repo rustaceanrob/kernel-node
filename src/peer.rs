@@ -191,7 +191,7 @@ impl BitcoinPeer {
         socket_addr: SocketAddr,
         network: Network,
         node_state: &mut NodeState,
-    ) -> std::io::Result<Self> {
+    ) -> Result<Self, p2p::net::Error> {
         let height = node_state.chainman.active_chain().height();
         let conf = ConnectionConfig::new()
             .change_network(network)
@@ -199,48 +199,44 @@ impl BitcoinPeer {
             .set_service_requirement(ServiceFlags::NETWORK)
             .offer_services(ServiceFlags::WITNESS)
             .user_agent(UserAgent::from_nonstandard("kernel-node"));
-        let (writer, reader, _) = conf
-            .open_connection(socket_addr, TimeoutParams::new())
-            .unwrap();
+        let (writer, reader, _) = conf.open_connection(socket_addr, TimeoutParams::new())?;
 
         let addr = Address::new(&socket_addr, ServiceFlags::WITNESS);
         info!("Connected to {:?}", addr);
         let state_machine = PeerStateMachine::AwaitingInv;
+        let our_best = node_state.get_tip_state().block_hash;
+        let getblocks = create_getblocks_message(our_best);
+        writer.send_message(getblocks)?;
         let peer = BitcoinPeer {
             addr,
             writer: Arc::new(writer),
             reader,
             state_machine,
         };
-        let our_best = node_state.get_tip_state().block_hash;
-        let getblocks = create_getblocks_message(our_best);
-        peer.send_message(getblocks).unwrap();
         Ok(peer)
     }
 
     pub fn writer(&self) -> Arc<ConnectionWriter> {
-        Arc::clone(&self.writer) 
+        Arc::clone(&self.writer)
     }
 
-    pub fn send_message(&self, msg: NetworkMessage) -> std::io::Result<()> {
-        self.writer.send_message(msg).unwrap();
-        Ok(())
-    }
-
-    fn receive_message(&mut self) -> std::io::Result<NetworkMessage> {
-        Ok(self.reader.read_message().unwrap().unwrap())
+    fn receive_message(&mut self) -> Result<NetworkMessage, p2p::net::Error> {
+        Ok(self
+            .reader
+            .read_message()?
+            .expect("v1 only supported currently"))
     }
 
     pub fn receive_and_process_message(
         &mut self,
         node_state: &mut NodeState,
-    ) -> std::io::Result<()> {
+    ) -> Result<(), p2p::net::Error> {
         let msg = self.receive_message()?;
         let old_state = std::mem::take(&mut self.state_machine);
         let (peer_state_machine, mut messages) = process_message(old_state, msg, node_state);
         self.state_machine = peer_state_machine;
         for message in messages.drain(..) {
-            self.send_message(message)?;
+            self.writer.send_message(message)?
         }
         Ok(())
     }
