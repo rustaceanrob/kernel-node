@@ -15,7 +15,10 @@ pub mod kernel_util;
 mod peer;
 
 use crate::kernel_util::BitcoinNetwork;
-use bitcoin::{key::rand::{seq::SliceRandom, thread_rng}, BlockHash, Network};
+use bitcoin::{
+    key::rand::{seq::SliceRandom, thread_rng},
+    BlockHash, Network,
+};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
@@ -24,7 +27,7 @@ use clap::Parser;
 use home::home_dir;
 use kernel_util::bitcoin_block_to_kernel_block;
 use log::{debug, error, info, warn};
-use p2p::{dns::DnsQueryExt, p2p::NetworkExt};
+use p2p::{dns::DnsQueryExt, p2p_message_types::NetworkExt};
 use peer::{BitcoinPeer, NodeState, TipState};
 
 #[derive(Parser, Debug)]
@@ -185,6 +188,7 @@ fn run(
         addresses.choose(&mut rng).copied().unwrap()
     };
     let mut peer = BitcoinPeer::new(addr, network, &mut node_state)?;
+    let writer = peer.writer();
     info!("Connected to peer");
 
     let chainman = Arc::clone(&node_state.chainman);
@@ -226,6 +230,7 @@ fn run(
 
     if let Ok(()) = shutdown_rx.recv() {
         context.interrupt().unwrap();
+        let _ = writer.shutdown();
         info!("Received shutdown signal, shutting down...");
         running.store(false, Ordering::SeqCst);
     }

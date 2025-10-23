@@ -6,19 +6,16 @@ use std::{
 };
 
 use bitcoin::Network;
-use bitcoin_messages::{
-    message::NetworkMessage,
-    message_blockdata::{GetBlocksMessage, Inventory},
-    Address, ServiceFlags,
-};
 use bitcoinkernel::{ChainstateManager, Context};
 use log::{debug, info};
 use p2p::{
     handshake::ConnectionConfig,
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
-    p2p::{
-        self as bitcoin_messages, message::InventoryPayload, message_network::UserAgent,
-        ProtocolVersion,
+    p2p_message_types::{
+        message::{InventoryPayload, NetworkMessage},
+        message_blockdata::{GetBlocksMessage, Inventory},
+        message_network::UserAgent,
+        Address, ProtocolVersion, ServiceFlags,
     },
 };
 
@@ -178,7 +175,7 @@ pub fn process_message(
 
 pub struct BitcoinPeer {
     addr: Address,
-    writer: ConnectionWriter,
+    writer: Arc<ConnectionWriter>,
     reader: ConnectionReader,
     state_machine: PeerStateMachine,
 }
@@ -211,7 +208,7 @@ impl BitcoinPeer {
         let state_machine = PeerStateMachine::AwaitingInv;
         let peer = BitcoinPeer {
             addr,
-            writer,
+            writer: Arc::new(writer),
             reader,
             state_machine,
         };
@@ -219,6 +216,10 @@ impl BitcoinPeer {
         let getblocks = create_getblocks_message(our_best);
         peer.send_message(getblocks).unwrap();
         Ok(peer)
+    }
+
+    pub fn writer(&self) -> Arc<ConnectionWriter> {
+        Arc::clone(&self.writer) 
     }
 
     pub fn send_message(&self, msg: NetworkMessage) -> std::io::Result<()> {
