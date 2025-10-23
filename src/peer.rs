@@ -6,19 +6,16 @@ use std::{
 };
 
 use bitcoin::Network;
-use bitcoin_messages::{
-    message::NetworkMessage,
-    message_blockdata::{GetBlocksMessage, Inventory},
-    Address, ServiceFlags,
-};
 use bitcoinkernel::{ChainstateManager, Context};
 use log::{debug, info};
 use p2p::{
     handshake::ConnectionConfig,
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
-    p2p::{
-        self as bitcoin_messages, message::InventoryPayload, message_network::UserAgent,
-        ProtocolVersion,
+    p2p_message_types::{
+        message::{InventoryPayload, NetworkMessage},
+        message_blockdata::{GetBlocksMessage, Inventory},
+        message_network::UserAgent,
+        Address, ProtocolVersion, ServiceFlags,
     },
 };
 
