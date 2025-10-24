@@ -29,9 +29,15 @@ use kernel_util::bitcoin_block_to_kernel_block;
 use log::{debug, error, info, warn};
 use p2p::{
     dns::DnsQueryExt,
-    p2p_message_types::{message::AddrV2Payload, NetworkExt},
+    p2p_message_types::{address::AddrV2, message::AddrV2Payload, NetworkExt, ServiceFlags},
 };
 use peer::{BitcoinPeer, NodeState, TipState};
+
+const TABLE_WIDTH: usize = 16;
+const TABLE_SLOT: usize = 16;
+const MAX_BUCKETS: usize = 4;
+
+const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -164,11 +170,10 @@ fn setup_logging() {
 //     })
 // }
 
-fn resolve_seeds(network: Network) -> Vec<SocketAddr> {
+fn resolve_seeds(network: Network) -> Vec<IpAddr> {
     network
         .query_dns_seeds(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53))
         .into_iter()
-        .map(|ip| SocketAddr::new(ip, network.default_p2p_port()))
         .collect()
 }
 
@@ -180,6 +185,7 @@ fn run(
     addr_rx: mpsc::Receiver<AddrV2Payload>,
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
 ) -> std::io::Result<()> {
+    let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
     let addr = if let Some(addr) = connect {
         addr
     } else {
@@ -188,8 +194,29 @@ fn run(
             "These are the resolved addresses from the dns seeds: {:?}",
             addresses
         );
+        for addr in &addresses {
+            let record = match addr {
+                IpAddr::V4(ipv4) => addrman::Record::new(
+                    AddrV2::Ipv4(*ipv4),
+                    network.default_p2p_port(),
+                    ServiceFlags::NETWORK,
+                    &DNS_RESOLVER,
+                ),
+                IpAddr::V6(ipv6) => addrman::Record::new(
+                    AddrV2::Ipv6(*ipv6),
+                    network.default_p2p_port(),
+                    ServiceFlags::NETWORK,
+                    &DNS_RESOLVER,
+                ),
+            };
+            table.add(&record);
+        }
         let mut rng = thread_rng();
-        addresses.choose(&mut rng).copied().unwrap()
+        addresses
+            .choose(&mut rng)
+            .copied()
+            .map(|ip| SocketAddr::new(ip, network.default_p2p_port()))
+            .unwrap()
     };
     let mut peer = BitcoinPeer::new(addr, network, &mut node_state).unwrap();
     let writer = peer.writer();
@@ -197,6 +224,7 @@ fn run(
 
     let chainman = Arc::clone(&node_state.chainman);
     let context = Arc::clone(&node_state.context);
+    let addrman = Arc::new(Mutex::new(table));
 
     let running = Arc::new(AtomicBool::new(true));
     let running_addr = running.clone();
@@ -224,8 +252,20 @@ fn run(
     let addr_processing_handler = thread::spawn(move || {
         info!("Starting addr processing thread.");
         while running_addr.load(Ordering::SeqCst) {
-            if addr_rx.recv().is_err() {
-                break;
+            match addr_rx.recv() {
+                Ok(payload) => {
+                    let mut addr_lock = addrman.lock().unwrap();
+                    for address in payload.0 {
+                        let record = addrman::Record::new(
+                            address.addr,
+                            network.default_p2p_port(),
+                            address.services,
+                            &DNS_RESOLVER,
+                        );
+                        addr_lock.add(&record);
+                    }
+                }
+                Err(_) => break,
             }
         }
         info!("Stopping addr processing thread.");
