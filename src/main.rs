@@ -27,7 +27,10 @@ use clap::Parser;
 use home::home_dir;
 use kernel_util::bitcoin_block_to_kernel_block;
 use log::{debug, error, info, warn};
-use p2p::{dns::DnsQueryExt, p2p_message_types::NetworkExt};
+use p2p::{
+    dns::DnsQueryExt,
+    p2p_message_types::{message::AddrV2Payload, NetworkExt},
+};
 use peer::{BitcoinPeer, NodeState, TipState};
 
 #[derive(Parser, Debug)]
@@ -174,6 +177,7 @@ fn run(
     connect: Option<SocketAddr>,
     mut node_state: NodeState,
     shutdown_rx: mpsc::Receiver<()>,
+    addr_rx: mpsc::Receiver<AddrV2Payload>,
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
 ) -> std::io::Result<()> {
     let addr = if let Some(addr) = connect {
@@ -195,6 +199,7 @@ fn run(
     let context = Arc::clone(&node_state.context);
 
     let running = Arc::new(AtomicBool::new(true));
+    let running_addr = running.clone();
     let running_peer = running.clone();
     let running_block = running.clone();
 
@@ -214,6 +219,16 @@ fn run(
             }
         }
         info!("Stopping net processing thread.");
+    });
+
+    let addr_processing_handler = thread::spawn(move || {
+        info!("Starting addr processing thread.");
+        while running_addr.load(Ordering::SeqCst) {
+            if addr_rx.recv().is_err() {
+                break;
+            }
+        }
+        info!("Stopping addr processing thread.");
     });
 
     let block_processing_handler = thread::spawn(move || {
@@ -238,6 +253,7 @@ fn run(
         running.store(false, Ordering::SeqCst);
     }
 
+    addr_processing_handler.join().unwrap();
     peer_processing_handler.join().unwrap();
     block_processing_handler.join().unwrap();
 
@@ -270,8 +286,10 @@ fn main() {
     let chainman = Arc::new(ChainstateManager::new(chainman_opts).unwrap());
 
     let (block_tx, block_rx) = mpsc::sync_channel(1);
+    let (addr_tx, addr_rx) = mpsc::channel();
 
     let node_state = NodeState {
+        addr_tx,
         block_tx,
         tip_state,
         chainman,
@@ -301,6 +319,7 @@ fn main() {
         connect,
         node_state,
         shutdown_rx,
+        addr_rx,
         block_rx,
     )
     .unwrap();
