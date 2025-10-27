@@ -1,6 +1,7 @@
 use std::{
     fs,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+    ops::DerefMut,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -15,10 +16,7 @@ pub mod kernel_util;
 mod peer;
 
 use crate::kernel_util::BitcoinNetwork;
-use bitcoin::{
-    key::rand::{seq::SliceRandom, thread_rng},
-    BlockHash, Network,
-};
+use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
@@ -186,41 +184,49 @@ fn run(
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
 ) -> std::io::Result<()> {
     let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
-    let addr = if let Some(addr) = connect {
-        addr
-    } else {
-        let addresses = resolve_seeds(network);
-        info!(
-            "These are the resolved addresses from the dns seeds: {:?}",
-            addresses
-        );
-        for addr in &addresses {
-            let record = match addr {
+    match connect {
+        Some(connect) => {
+            let record = match connect.ip() {
                 IpAddr::V4(ipv4) => addrman::Record::new(
-                    AddrV2::Ipv4(*ipv4),
-                    network.default_p2p_port(),
+                    AddrV2::Ipv4(ipv4),
+                    connect.port(),
                     ServiceFlags::NETWORK,
                     &DNS_RESOLVER,
                 ),
                 IpAddr::V6(ipv6) => addrman::Record::new(
-                    AddrV2::Ipv6(*ipv6),
-                    network.default_p2p_port(),
+                    AddrV2::Ipv6(ipv6),
+                    connect.port(),
                     ServiceFlags::NETWORK,
                     &DNS_RESOLVER,
                 ),
             };
             table.add(&record);
         }
-        let mut rng = thread_rng();
-        addresses
-            .choose(&mut rng)
-            .copied()
-            .map(|ip| SocketAddr::new(ip, network.default_p2p_port()))
-            .unwrap()
+        None => {
+            let addresses = resolve_seeds(network);
+            info!(
+                "These are the resolved addresses from the dns seeds: {:?}",
+                addresses
+            );
+            for addr in &addresses {
+                let record = match addr {
+                    IpAddr::V4(ipv4) => addrman::Record::new(
+                        AddrV2::Ipv4(*ipv4),
+                        network.default_p2p_port(),
+                        ServiceFlags::NETWORK,
+                        &DNS_RESOLVER,
+                    ),
+                    IpAddr::V6(ipv6) => addrman::Record::new(
+                        AddrV2::Ipv6(*ipv6),
+                        network.default_p2p_port(),
+                        ServiceFlags::NETWORK,
+                        &DNS_RESOLVER,
+                    ),
+                };
+                table.add(&record);
+            }
+        }
     };
-    let mut peer = BitcoinPeer::new(addr, network, &mut node_state).unwrap();
-    let writer = peer.writer();
-    info!("Connected to peer");
 
     let chainman = Arc::clone(&node_state.chainman);
     let context = Arc::clone(&node_state.context);
@@ -231,19 +237,52 @@ fn run(
     let running_peer = running.clone();
     let running_block = running.clone();
 
+    let peer_source = Arc::clone(&addrman);
+    let kill = Arc::new(Mutex::new(None));
+    let writer = Arc::clone(&kill);
+
     let peer_processing_handler = thread::spawn(move || {
         info!("Starting net processing thread.");
         while running_peer.load(Ordering::SeqCst) {
-            if let Err(e) = peer.receive_and_process_message(&mut node_state) {
-                match e {
-                    p2p::net::Error::Io(io) => {
-                        if io.kind() != std::io::ErrorKind::UnexpectedEof {
-                            error!("Unexpected I/O error: {}", io);
-                        }
-                    }
-                    e => error!("Error processing message: {e}"),
+            let addr_lock = peer_source.lock().unwrap();
+            let (address, port) = addr_lock.select().unwrap().network_addr();
+            let peer = match address {
+                AddrV2::Ipv4(ipv4) => BitcoinPeer::new(
+                    SocketAddr::V4(SocketAddrV4::new(ipv4, port)),
+                    network,
+                    &mut node_state,
+                ),
+                AddrV2::Ipv6(ipv6) => {
+                    let socket_adrr = (ipv6, port).into();
+                    BitcoinPeer::new(socket_adrr, network, &mut node_state)
                 }
-                break;
+                _ => continue,
+            };
+            let mut peer = match peer {
+                Ok(connection) => {
+                    info!("Connection established.");
+                    let mut writer_lock = writer.lock().unwrap();
+                    *writer_lock = Some(connection.writer());
+                    connection
+                }
+                Err(e) => {
+                    error!("Could not connect: {e}");
+                    std::thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+            };
+            loop {
+                if let Err(e) = peer.receive_and_process_message(&mut node_state) {
+                    match e {
+                        p2p::net::Error::Io(io) => {
+                            if io.kind() != std::io::ErrorKind::UnexpectedEof {
+                                error!("Unexpected I/O error: {}", io);
+                            }
+                        }
+                        e => error!("Error processing message: {e}"),
+                    }
+                    break;
+                }
             }
         }
         info!("Stopping net processing thread.");
@@ -258,7 +297,7 @@ fn run(
                     for address in payload.0 {
                         let record = addrman::Record::new(
                             address.addr,
-                            network.default_p2p_port(),
+                            address.port,
                             address.services,
                             &DNS_RESOLVER,
                         );
@@ -288,7 +327,10 @@ fn run(
 
     if let Ok(()) = shutdown_rx.recv() {
         context.interrupt().unwrap();
-        let _ = writer.shutdown();
+        let mut peer_lock = kill.lock().unwrap();
+        if let Some(conn) = peer_lock.deref_mut() {
+            conn.shutdown().unwrap()
+        }
         info!("Received shutdown signal, shutting down...");
         running.store(false, Ordering::SeqCst);
     }
