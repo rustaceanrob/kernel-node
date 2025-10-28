@@ -1,6 +1,8 @@
 use bitcoin::{block::Checked, consensus::encode, Network, TestnetVersion};
 use bitcoinkernel::{BlockTreeEntry, ChainType};
 use clap::ValueEnum;
+use home::home_dir;
+use std::{fs, path::PathBuf};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum BitcoinNetwork {
@@ -29,6 +31,30 @@ impl From<BitcoinNetwork> for ChainType {
             BitcoinNetwork::Signet => ChainType::Signet,
             BitcoinNetwork::Regtest => ChainType::Regtest,
         }
+    }
+}
+
+pub trait DirnameExt {
+    fn data_dir(&self) -> String;
+}
+
+impl DirnameExt for String {
+    fn data_dir(&self) -> String {
+        let path = match self.strip_prefix("~/") {
+            Some(rest) => match home_dir() {
+                Some(mut home) => {
+                    home.push(rest);
+                    home
+                }
+                None => PathBuf::from(rest),
+            },
+            None => PathBuf::from(self),
+        };
+        // Create directories if they don't exist
+        fs::create_dir_all(&path).unwrap();
+
+        // Get canonical (full) path
+        path.canonicalize().unwrap().to_str().unwrap().to_string()
     }
 }
 

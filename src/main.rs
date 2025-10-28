@@ -1,8 +1,6 @@
 use std::{
-    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     ops::DerefMut,
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
@@ -22,8 +20,7 @@ use bitcoinkernel::{
     SynchronizationState, ValidationMode,
 };
 use clap::Parser;
-use home::home_dir;
-use kernel_util::bitcoin_block_to_kernel_block;
+use kernel_util::{bitcoin_block_to_kernel_block, DirnameExt};
 use log::{debug, error, info, warn};
 use p2p::{
     dns::DnsQueryExt,
@@ -51,27 +48,6 @@ struct Args {
     /// Connect only to this node (format: ip:port or hostname:port)
     #[arg(long)]
     connect: Option<String>,
-}
-
-impl Args {
-    fn get_data_dir(&self) -> String {
-        let path = if self.datadir.starts_with("~/") {
-            if let Some(mut home) = home_dir() {
-                home.push(&self.datadir[2..]);
-                home
-            } else {
-                PathBuf::from(&self.datadir)
-            }
-        } else {
-            PathBuf::from(&self.datadir)
-        };
-
-        // Create directories if they don't exist
-        fs::create_dir_all(&path).unwrap();
-
-        // Get canonical (full) path
-        path.canonicalize().unwrap().to_str().unwrap().to_string()
-    }
 }
 
 fn create_context(
@@ -357,7 +333,7 @@ fn main() {
     let context = create_context(args.network.into(), shutdown_tx.clone(), &tip_state);
 
     ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
-    let data_dir = args.get_data_dir();
+    let data_dir = args.datadir.data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman_opts = ChainstateManagerOptions::new(&context, &data_dir, &blocks_dir).unwrap();
     chainman_opts.set_worker_threads(
