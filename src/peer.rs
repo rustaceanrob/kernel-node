@@ -12,7 +12,7 @@ use p2p::{
     handshake::ConnectionConfig,
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
     p2p_message_types::{
-        message::{InventoryPayload, NetworkMessage},
+        message::{AddrV2Payload, InventoryPayload, NetworkMessage},
         message_blockdata::{GetBlocksMessage, Inventory},
         message_network::UserAgent,
         Address, ProtocolVersion, ServiceFlags,
@@ -29,6 +29,7 @@ pub struct TipState {
 }
 
 pub struct NodeState {
+    pub addr_tx: mpsc::Sender<AddrV2Payload>,
     pub block_tx: mpsc::SyncSender<bitcoinkernel::Block>,
     pub tip_state: Arc<Mutex<TipState>>,
     pub context: Arc<Context>,
@@ -99,6 +100,13 @@ pub fn process_message(
     if let NetworkMessage::Ping(nonce) = event {
         info!("Received ping, responding pong.");
         return (state_machine, vec![NetworkMessage::Pong(nonce)]);
+    }
+
+    if let NetworkMessage::AddrV2(payload) = event {
+        info!("Received {} net addresses", payload.0.len());
+        // If the address manager has a full queue these net addresses should be dropped.
+        let _ = node_state.addr_tx.send(payload);
+        return (state_machine, vec![]);
     }
 
     match state_machine {
@@ -196,6 +204,7 @@ impl BitcoinPeer {
         let conf = ConnectionConfig::new()
             .change_network(network)
             .our_height(height)
+            .request_addr()
             .set_service_requirement(ServiceFlags::NETWORK)
             .offer_services(ServiceFlags::WITNESS)
             .user_agent(UserAgent::from_nonstandard("kernel-node"));

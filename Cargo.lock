@@ -126,6 +126,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-address-book"
+version = "0.1.0"
+source = "git+https://github.com/rustaceanrob/bitcoin-address-book?rev=4417e4c8f5d04245947c758b73fb0dc9e7e0bd15#4417e4c8f5d04245947c758b73fb0dc9e7e0bd15"
+dependencies = [
+ "bitcoin",
+ "bitcoin-p2p-messages",
+]
+
+[[package]]
 name = "bitcoin-internals"
 version = "0.4.0"
 source = "git+https://github.com/rust-bitcoin/rust-bitcoin?rev=16cc257c3695dea0e7301a5fa9cab44b8ed60598#16cc257c3695dea0e7301a5fa9cab44b8ed60598"
@@ -443,6 +452,7 @@ name = "kernel-node"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "bitcoin-address-book",
  "bitcoin-p2p",
  "bitcoinkernel",
  "clap",
