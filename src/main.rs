@@ -1,8 +1,6 @@
 use std::{
-    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     ops::DerefMut,
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, RecvTimeoutError},
@@ -15,15 +13,12 @@ use std::{
 pub mod kernel_util;
 mod peer;
 
-use crate::kernel_util::BitcoinNetwork;
 use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
 };
-use clap::Parser;
-use home::home_dir;
-use kernel_util::bitcoin_block_to_kernel_block;
+use kernel_util::{bitcoin_block_to_kernel_block, ChainExt, DirnameExt};
 use log::{debug, error, info, warn};
 use p2p::{
     dns::DnsQueryExt,
@@ -37,42 +32,7 @@ const MAX_BUCKETS: usize = 4;
 
 const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Which Bitcoin network to use
-    #[arg(value_enum, short, long, default_value = "signet")]
-    network: BitcoinNetwork,
-
-    /// Data directory for blockchain and configuration
-    #[arg(long, default_value = "~/.kernel-node")]
-    datadir: String,
-
-    /// Connect only to this node (format: ip:port or hostname:port)
-    #[arg(long)]
-    connect: Option<String>,
-}
-
-impl Args {
-    fn get_data_dir(&self) -> String {
-        let path = if self.datadir.starts_with("~/") {
-            if let Some(mut home) = home_dir() {
-                home.push(&self.datadir[2..]);
-                home
-            } else {
-                PathBuf::from(&self.datadir)
-            }
-        } else {
-            PathBuf::from(&self.datadir)
-        };
-
-        // Create directories if they don't exist
-        fs::create_dir_all(&path).unwrap();
-
-        // Get canonical (full) path
-        path.canonicalize().unwrap().to_str().unwrap().to_string()
-    }
-}
+configure_me::include_config!();
 
 fn create_context(
     chain_type: ChainType,
@@ -344,7 +304,7 @@ fn run(
 }
 
 fn main() {
-    let args = Args::parse();
+    let (config, _) = Config::including_optional_config_files::<&[&str]>(&[]).unwrap_or_exit();
     START.call_once(|| {
         setup_logging();
     });
@@ -354,10 +314,11 @@ fn main() {
         block_hash: BlockHash::GENESIS_PREVIOUS_BLOCK_HASH,
     }));
 
-    let context = create_context(args.network.into(), shutdown_tx.clone(), &tip_state);
+    let network = config.network.parse::<Network>().expect("invalid network");
+    let context = create_context(network.chain_type(), shutdown_tx.clone(), &tip_state);
 
     ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
-    let data_dir = args.get_data_dir();
+    let data_dir = config.datadir.data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman_opts = ChainstateManagerOptions::new(&context, &data_dir, &blocks_dir).unwrap();
     chainman_opts.set_worker_threads(
@@ -389,20 +350,12 @@ fn main() {
 
     info!("Bitcoin kernel initialized");
 
-    let connect: Option<SocketAddr> = args.connect.map(|sock| sock.parse().unwrap());
+    let connect: Option<SocketAddr> = config.connect.map(|sock| sock.parse().unwrap());
 
     if shutdown_rx.try_recv().is_ok() {
         info!("Shutting down!");
         return;
     }
 
-    run(
-        args.network.into(),
-        connect,
-        node_state,
-        shutdown_rx,
-        addr_rx,
-        block_rx,
-    )
-    .unwrap();
+    run(network, connect, node_state, shutdown_rx, addr_rx, block_rx).unwrap();
 }

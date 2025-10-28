@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.0", features = ["derive"]}
+configure_me = "0.4.0"
 # bitcoinkernel = { path = "../rust-bitcoinkernel", version = "0.0.15" }
 bitcoinkernel = "0.0.23"
 env_logger = "0.10"
@@ -14,3 +14,9 @@ p2p = { package = "bitcoin-p2p", git =  "https://github.com/2140-dev/bitcoin-p2p
 home = "0.5"
 log = "0.4"
 ctrlc = "3.4.5"
+
+[build-dependencies]
+configure_me_codegen = "0.4.0"
+
+[package.metadata.configure_me]
+spec = "config_spec.toml"
