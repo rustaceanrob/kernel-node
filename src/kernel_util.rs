@@ -1,35 +1,21 @@
 use bitcoin::{block::Checked, consensus::encode, Network, TestnetVersion};
 use bitcoinkernel::{BlockTreeEntry, ChainType};
-use clap::ValueEnum;
 use home::home_dir;
 use std::{fs, path::PathBuf};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum BitcoinNetwork {
-    Mainnet,
-    Testnet,
-    Signet,
-    Regtest,
+pub trait ChainExt {
+    fn chain_type(&self) -> ChainType;
 }
 
-impl From<BitcoinNetwork> for bitcoin::Network {
-    fn from(network: BitcoinNetwork) -> Self {
-        match network {
-            BitcoinNetwork::Mainnet => Network::Bitcoin,
-            BitcoinNetwork::Testnet => Network::Testnet(TestnetVersion::V3),
-            BitcoinNetwork::Signet => Network::Signet,
-            BitcoinNetwork::Regtest => Network::Regtest,
-        }
-    }
-}
-
-impl From<BitcoinNetwork> for ChainType {
-    fn from(network: BitcoinNetwork) -> Self {
-        match network {
-            BitcoinNetwork::Mainnet => ChainType::Mainnet,
-            BitcoinNetwork::Testnet => ChainType::Testnet,
-            BitcoinNetwork::Signet => ChainType::Signet,
-            BitcoinNetwork::Regtest => ChainType::Regtest,
+impl ChainExt for Network {
+    fn chain_type(&self) -> ChainType {
+        match self {
+            Network::Bitcoin => ChainType::Mainnet,
+            Network::Signet => ChainType::Signet,
+            Network::Testnet(TestnetVersion::V3) => ChainType::Testnet,
+            Network::Testnet(TestnetVersion::V4) => ChainType::Testnet4,
+            Network::Regtest => ChainType::Regtest,
+            _ => unimplemented!("unsupported network"),
         }
     }
 }

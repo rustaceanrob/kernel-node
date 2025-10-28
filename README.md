@@ -9,8 +9,7 @@ peers.
 For now, IBD is done from a single peer, selected from the DNS seed nodes. If the
 connection to this peer happens to fail for some reason, a new peer will be selected.
 A direct connection can also be selected from the command line. See `--help` for
-this. If the connection fails, the users has to restart and retry manually for
-now.
+this.
 
 To run on e.g. signet:
 
