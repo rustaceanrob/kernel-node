@@ -20,3 +20,6 @@ configure_me_codegen = "0.4.0"
 
 [package.metadata.configure_me]
 spec = "config_spec.toml"
+
+[[bin]]
+name = "node"

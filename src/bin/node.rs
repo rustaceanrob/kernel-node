@@ -10,21 +10,18 @@ use std::{
     time::Duration,
 };
 
-pub mod kernel_util;
-mod peer;
-
 use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
 };
-use kernel_util::{bitcoin_block_to_kernel_block, ChainExt, DirnameExt};
+use kernel_node::kernel_util::{ChainExt, DirnameExt};
 use log::{debug, error, info, warn};
 use p2p::{
     dns::DnsQueryExt,
     p2p_message_types::{address::AddrV2, message::AddrV2Payload, NetworkExt, ServiceFlags},
 };
-use peer::{BitcoinPeer, NodeState, TipState};
+use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;

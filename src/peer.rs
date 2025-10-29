@@ -19,7 +19,7 @@ use p2p::{
     },
 };
 
-use crate::bitcoin_block_to_kernel_block;
+use crate::kernel_util::bitcoin_block_to_kernel_block;
 
 const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::INVALID_CB_NO_BAN_VERSION;
 
