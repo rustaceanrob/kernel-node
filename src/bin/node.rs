@@ -16,12 +16,12 @@ use bitcoinkernel::{
     SynchronizationState, ValidationMode,
 };
 use kernel_node::kernel_util::{ChainExt, DirnameExt};
+use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
 use log::{debug, error, info, warn};
 use p2p::{
     dns::DnsQueryExt,
     p2p_message_types::{address::AddrV2, message::AddrV2Payload, NetworkExt, ServiceFlags},
 };
-use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -306,9 +306,7 @@ fn main() {
     });
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
 
-    let tip_state = Arc::new(Mutex::new(TipState {
-        block_hash: BlockHash::GENESIS_PREVIOUS_BLOCK_HASH,
-    }));
+    let tip_state = Arc::new(Mutex::new(TipState::default()));
 
     let network = config.network.parse::<Network>().expect("invalid network");
     let context = create_context(network.chain_type(), shutdown_tx.clone(), &tip_state);
