@@ -220,7 +220,6 @@ fn run(
             };
             let mut peer = match peer {
                 Ok(connection) => {
-                    info!("Connection established.");
                     let mut writer_lock = writer.lock().unwrap();
                     *writer_lock = Some(connection.writer());
                     connection
@@ -350,7 +349,9 @@ fn main() {
 
     info!("Bitcoin kernel initialized");
 
-    let connect: Option<SocketAddr> = config.connect.map(|sock| sock.parse().unwrap());
+    let connect = config
+        .connect
+        .map(|sock| sock.parse::<SocketAddr>().unwrap());
 
     if shutdown_rx.try_recv().is_ok() {
         info!("Shutting down!");
