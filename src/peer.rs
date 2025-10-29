@@ -5,7 +5,7 @@ use std::{
     sync::{mpsc, Arc, Mutex},
 };
 
-use bitcoin::Network;
+use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{ChainstateManager, Context};
 use log::{debug, info};
 use p2p::{
@@ -26,6 +26,14 @@ const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::INVALID_CB_NO_BAN_VER
 #[derive(Clone)]
 pub struct TipState {
     pub block_hash: bitcoin::BlockHash,
+}
+
+impl Default for TipState {
+    fn default() -> Self {
+        Self {
+            block_hash: BlockHash::GENESIS_PREVIOUS_BLOCK_HASH,
+        }
+    }
 }
 
 pub struct NodeState {
