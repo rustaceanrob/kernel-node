@@ -14,8 +14,10 @@ p2p = { package = "bitcoin-p2p", git =  "https://github.com/2140-dev/bitcoin-p2p
 home = "0.5"
 log = "0.4"
 ctrlc = "3.4.5"
+capnp = "0.23"
 
 [build-dependencies]
+capnpc = "0.23"
 configure_me_codegen = "0.4.0"
 
 [package.metadata.configure_me]
