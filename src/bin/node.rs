@@ -15,13 +15,19 @@ use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
 };
-use kernel_node::kernel_util::{ChainExt, DirnameExt};
 use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
+use kernel_node::{
+    echo_capnp::echo,
+    ipc::IpcInterface,
+    kernel_util::{ChainExt, DirnameExt},
+};
 use log::{debug, error, info, warn};
 use p2p::{
     dns::DnsQueryExt,
     p2p_message_types::{address::AddrV2, message::AddrV2Payload, NetworkExt, ServiceFlags},
 };
+use tokio::net::UnixListener;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -353,5 +359,25 @@ fn main() {
         return;
     }
 
-    run(network, connect, node_state, shutdown_rx, addr_rx, block_rx).unwrap();
+    tokio::task::LocalSet::new().spawn_local(async move {
+        let _ = std::fs::remove_file("./node.sock");
+        let unix_socket = UnixListener::bind("./node.sock").unwrap();
+        loop {
+            let (stream, _) = unix_socket.accept().await.unwrap();
+            let (reader, writer) = stream.into_split();
+            let buf_reader = futures::io::BufReader::new(reader.compat());
+            let buf_writer = futures::io::BufWriter::new(writer.compat_write());
+            let network = capnp_rpc::twoparty::VatNetwork::new(
+                buf_reader,
+                buf_writer,
+                capnp_rpc::rpc_twoparty_capnp::Side::Server,
+                Default::default(),
+            );
+            let client: echo::Client = capnp_rpc::new_client(IpcInterface);
+            let rpc_system = capnp_rpc::RpcSystem::new(Box::new(network), Some(client.client));
+            tokio::task::spawn_local(rpc_system);
+        }
+    });
+
+    run(network, connect, node_state, shutdown_rx, addr_rx, block_rx).unwrap()
 }
