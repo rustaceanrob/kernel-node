@@ -356,24 +356,37 @@ fn main() {
         return;
     }
 
-    tokio::task::LocalSet::new().spawn_local(async move {
-        let _ = std::fs::remove_file("./node.sock");
-        let unix_socket = UnixListener::bind("./node.sock").unwrap();
-        loop {
-            let (stream, _) = unix_socket.accept().await.unwrap();
-            let (reader, writer) = stream.into_split();
-            let buf_reader = futures::io::BufReader::new(reader.compat());
-            let buf_writer = futures::io::BufWriter::new(writer.compat_write());
-            let network = capnp_rpc::twoparty::VatNetwork::new(
-                buf_reader,
-                buf_writer,
-                capnp_rpc::rpc_twoparty_capnp::Side::Server,
-                Default::default(),
-            );
-            let client: echo::Client = capnp_rpc::new_client(IpcInterface);
-            let rpc_system = capnp_rpc::RpcSystem::new(Box::new(network), Some(client.client));
-            tokio::task::spawn_local(rpc_system);
-        }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    std::thread::spawn(move || {
+        rt.block_on(async move {
+            tokio::task::LocalSet::new()
+                .run_until(async move {
+                    let _ = std::fs::remove_file("./node.sock");
+                    info!("Listening for incoming IPC requests");
+                    let unix_socket = UnixListener::bind("./node.sock").unwrap();
+                    loop {
+                        let (stream, _) = unix_socket.accept().await.unwrap();
+                        info!("Handling inbound IPC call");
+                        let (reader, writer) = stream.into_split();
+                        let buf_reader = futures::io::BufReader::new(reader.compat());
+                        let buf_writer = futures::io::BufWriter::new(writer.compat_write());
+                        let network = capnp_rpc::twoparty::VatNetwork::new(
+                            buf_reader,
+                            buf_writer,
+                            capnp_rpc::rpc_twoparty_capnp::Side::Server,
+                            Default::default(),
+                        );
+                        let client: echo::Client = capnp_rpc::new_client(IpcInterface);
+                        let rpc_system =
+                            capnp_rpc::RpcSystem::new(Box::new(network), Some(client.client));
+                        tokio::task::spawn_local(rpc_system);
+                    }
+                })
+                .await;
+        })
     });
 
     run(network, connect, node_state, shutdown_rx, addr_rx, block_rx).unwrap()
