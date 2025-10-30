@@ -11,6 +11,7 @@ bitcoin = { git = "https://github.com/rust-bitcoin/rust-bitcoin", default-featur
 p2p = { package = "bitcoin-p2p", git =  "https://github.com/2140-dev/bitcoin-p2p.git", rev = "a12f3372982efb62cbee8c6af8938343541c6d06" }
 ## Log and configuration
 configure_me = "0.4.0"
+clap = { version = "4", features = ["derive"] }
 home = "0.5"
 log = "0.4"
 ctrlc = "3.4.5"
@@ -31,3 +32,6 @@ spec = "config_spec.toml"
 
 [[bin]]
 name = "node"
+
+[[bin]]
+name = "cli"
