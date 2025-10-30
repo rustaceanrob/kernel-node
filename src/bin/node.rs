@@ -167,10 +167,7 @@ fn run(
         }
         None => {
             let addresses = resolve_seeds(network);
-            info!(
-                "These are the resolved addresses from the dns seeds: {:?}",
-                addresses
-            );
+            info!("{} addresses resolved from the dns seeds", addresses.len());
             for addr in &addresses {
                 let record = match addr {
                     IpAddr::V4(ipv4) => addrman::Record::new(
