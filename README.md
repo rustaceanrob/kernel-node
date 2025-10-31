@@ -18,3 +18,12 @@ cargo run --bin node --release -- --network signet
 ```
 
 By default it will put data in the `$HOME/kernel-node` directory.
+
+Options: 
+
+```
+Arguments:
+        --network    Which Bitcoin network to use.
+        --datadir    Data directory for blockchain and configuration.
+        --connect    Connect only to this node (format: ip:port or hostname:port)
+```

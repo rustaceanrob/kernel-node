@@ -12,11 +12,13 @@ struct Args {
 
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Commands {
+    /// Echo a message to yourself.
     Echo(Echo),
 }
 
 #[derive(Debug, Clone, clap::Args)]
 struct Echo {
+    /// The message to echo.
     message: String,
 }
 
