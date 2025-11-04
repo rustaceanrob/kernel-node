@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use bitcoin::{BlockHash, Network};
+use bitcoin::{BlockHash, Network, TestnetVersion};
 use bitcoinkernel::{
     ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
     SynchronizationState, ValidationMode,
@@ -23,7 +23,7 @@ use kernel_node::{
 };
 use log::{debug, error, info, warn};
 use p2p::{
-    dns::DnsQueryExt,
+    dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS},
     p2p_message_types::{address::AddrV2, message::AddrV2Payload, NetworkExt, ServiceFlags},
 };
 use tokio::net::UnixListener;
@@ -132,10 +132,34 @@ fn setup_logging() {
 // }
 
 fn resolve_seeds(network: Network) -> Vec<IpAddr> {
-    network
-        .query_dns_seeds(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53))
-        .into_iter()
-        .collect()
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let format_hostname = |host: &str| format!("{host}:53");
+    let seeds: Vec<String> = match network {
+        Network::Bitcoin => BITCOIN_SEEDS.into_iter().map(format_hostname).collect(),
+        Network::Signet => SIGNET_SEEDS.into_iter().map(format_hostname).collect(),
+        Network::Testnet(TestnetVersion::V3) => {
+            TESTNET3_SEEDS.into_iter().map(format_hostname).collect()
+        }
+        Network::Testnet(TestnetVersion::V4) => {
+            TESTNET4_SEEDS.into_iter().map(format_hostname).collect()
+        }
+        Network::Regtest => Vec::new(),
+        _ => panic!("unknown network."),
+    };
+    let mut results = Vec::new();
+    for host in seeds {
+        let peers = rt.block_on(async move {
+            tokio::net::lookup_host(host)
+                .await
+                .map(|sockets| sockets.map(|socket| socket.ip()).collect())
+                .unwrap_or(Vec::new())
+        });
+        results.extend(peers);
+    }
+    results
 }
 
 fn run(
