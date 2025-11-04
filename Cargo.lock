@@ -191,7 +191,7 @@ dependencies = [
 [[package]]
 name = "bitcoin-p2p"
 version = "0.1.0"
-source = "git+https://github.com/2140-dev/bitcoin-p2p.git?rev=a12f3372982efb62cbee8c6af8938343541c6d06#a12f3372982efb62cbee8c6af8938343541c6d06"
+source = "git+https://github.com/2140-dev/bitcoin-p2p.git?rev=322c4abb2a947f3f2d85991a0cb450249c68c1ea#322c4abb2a947f3f2d85991a0cb450249c68c1ea"
 dependencies = [
  "bitcoin",
  "bitcoin-p2p-messages",
