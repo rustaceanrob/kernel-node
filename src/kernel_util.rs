@@ -1,5 +1,5 @@
 use bitcoin::{block::Checked, consensus::encode, Network, TestnetVersion};
-use bitcoinkernel::{BlockTreeEntry, ChainType};
+use bitcoinkernel::{core::BlockHashExt, BlockTreeEntry, ChainType};
 use home::home_dir;
 use std::{fs, path::PathBuf};
 
@@ -50,5 +50,5 @@ pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block<Checked>) -> bitcoin
 }
 
 pub fn get_block_hash(index: BlockTreeEntry) -> bitcoin::BlockHash {
-    bitcoin::BlockHash::from_byte_array(index.block_hash().into())
+    bitcoin::BlockHash::from_byte_array(index.block_hash().to_bytes())
 }

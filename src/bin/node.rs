@@ -12,8 +12,8 @@ use std::{
 
 use bitcoin::{BlockHash, Network, TestnetVersion};
 use bitcoinkernel::{
-    ChainType, ChainstateManager, ChainstateManagerOptions, Context, ContextBuilder, Log, Logger,
-    SynchronizationState, ValidationMode,
+    core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManagerBuilder,
+    Context, ContextBuilder, Log, Logger, SynchronizationState, ValidationMode,
 };
 use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
 use kernel_node::{
@@ -81,8 +81,8 @@ fn create_context(
                 }
         })
         // .with_block_checked_validation(setup_validation_interface(tip_state))
-        .with_block_checked_validation(move |block: bitcoinkernel::Block, mode, _result| {
-            match mode {
+        .with_block_checked_validation(move |block: bitcoinkernel::Block, state: bitcoinkernel::BlockValidationStateRef<'_>| {
+            match state.mode() {
                 ValidationMode::Valid => {
                     let hash = bitcoin::BlockHash::from_byte_array(block.hash().into());
                     log::debug!("Validation interface: Successfully checked block: {}", hash);
@@ -299,7 +299,7 @@ fn run(
             match block_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(block) => {
                     debug!("Validating block.");
-                    let (_accepted, _new_block) = chainman.process_block(&block);
+                    let _ = chainman.process_block(&block);
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -341,13 +341,14 @@ fn main() {
     ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
     let data_dir = config.datadir.data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
-    let chainman_opts = ChainstateManagerOptions::new(&context, &data_dir, &blocks_dir).unwrap();
-    chainman_opts.set_worker_threads(
-        ((available_parallelism().unwrap().get() / 2) + 1)
-            .try_into()
-            .unwrap(),
-    );
-    let chainman = Arc::new(ChainstateManager::new(chainman_opts).unwrap());
+    let chainman_builder = ChainstateManagerBuilder::new(&context, &data_dir, &blocks_dir)
+        .unwrap()
+        .worker_threads(
+            ((available_parallelism().unwrap().get() / 2) + 1)
+                .try_into()
+                .unwrap(),
+        );
+    let chainman = Arc::new(chainman_builder.build().unwrap());
 
     let (block_tx, block_rx) = mpsc::sync_channel(1);
     let (addr_tx, addr_rx) = mpsc::channel();
@@ -367,7 +368,7 @@ fn main() {
 
     let tip_index = node_state.chainman.active_chain().tip();
     let hash = tip_index.block_hash();
-    node_state.set_tip_state(BlockHash::from_byte_array(hash.into()));
+    node_state.set_tip_state(BlockHash::from_byte_array(hash.to_bytes()));
 
     info!("Bitcoin kernel initialized");
 
