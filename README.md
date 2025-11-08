@@ -17,7 +17,7 @@ To run on e.g. signet:
 cargo run --bin node --release -- --network signet
 ```
 
-By default it will put data in the `$HOME/kernel-node` directory.
+By default it will put data in the `$HOME/.kernel-node` directory.
 
 Options: 
 
