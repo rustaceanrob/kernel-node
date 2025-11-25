@@ -49,6 +49,11 @@ pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block<Checked>) -> bitcoin
     bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
 }
 
+pub fn bitcoin_header_to_kernel_header(header: &bitcoin::BlockHeader) -> bitcoinkernel::BlockHeader {
+    let ser_header = encode::serialize(header);
+    bitcoinkernel::BlockHeader::new(ser_header.as_slice()).unwrap()
+}
+
 pub fn get_block_hash(index: BlockTreeEntry) -> bitcoin::BlockHash {
     bitcoin::BlockHash::from_byte_array(index.block_hash().to_bytes())
 }

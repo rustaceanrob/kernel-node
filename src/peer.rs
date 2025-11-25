@@ -6,20 +6,17 @@ use std::{
 };
 
 use bitcoin::{BlockHash, Network};
-use bitcoinkernel::{ChainstateManager, Context};
-use log::{debug, info};
+use bitcoinkernel::{ChainstateManager, Context, ProcessBlockHeaderResult, ValidationMode, core::BlockHashExt, prelude::BlockValidationStateExt};
+use log::{debug, info, warn};
 use p2p::{
     handshake::ConnectionConfig,
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
     p2p_message_types::{
-        message::{AddrV2Payload, InventoryPayload, NetworkMessage},
-        message_blockdata::{GetBlocksMessage, Inventory},
-        message_network::UserAgent,
-        Address, ProtocolVersion, ServiceFlags,
+        Address, ProtocolVersion, ServiceFlags, message::{AddrV2Payload, InventoryPayload, NetworkMessage}, message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory}, message_network::UserAgent
     },
 };
 
-use crate::kernel_util::bitcoin_block_to_kernel_block;
+use crate::kernel_util::{bitcoin_block_to_kernel_block, bitcoin_header_to_kernel_header};
 
 const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::INVALID_CB_NO_BAN_VERSION;
 
@@ -60,6 +57,7 @@ impl NodeState {
 ///
 ///       [*]
 ///        │
+/// AwaitingHeaders
 ///        ▼
 ///   AwaitingInv
 ///       ▲ |
@@ -73,6 +71,7 @@ impl NodeState {
 #[derive(Default)]
 pub enum PeerStateMachine {
     #[default]
+    AwaitingHeaders,
     AwaitingInv,
     AwaitingBlock(AwaitingBlock),
 }
@@ -80,6 +79,14 @@ pub enum PeerStateMachine {
 pub struct AwaitingBlock {
     pub peer_inventory: HashSet<bitcoin::BlockHash>,
     pub block_buffer: HashMap<bitcoin::BlockHash /*prev */, bitcoinkernel::Block>,
+}
+
+fn create_getheaders_message(known_block_hash: bitcoin::BlockHash) -> NetworkMessage {
+    NetworkMessage::GetHeaders(GetHeadersMessage {
+        version: PROTOCOL_VERSION,
+        locator_hashes: vec![known_block_hash],
+        stop_hash: bitcoin::BlockHash::GENESIS_PREVIOUS_BLOCK_HASH,
+    })
 }
 
 fn create_getblocks_message(known_block_hash: bitcoin::BlockHash) -> NetworkMessage {
@@ -118,6 +125,35 @@ pub fn process_message(
     }
 
     match state_machine {
+        PeerStateMachine::AwaitingHeaders => match event {
+            NetworkMessage::Headers(headers) => {
+                for header in &headers.0 {
+                    let result = node_state.chainman.process_block_header(&bitcoin_header_to_kernel_header(&header));
+                    match result {
+                        ProcessBlockHeaderResult::Success(state) if state.mode() == ValidationMode::Valid => {
+                            debug!("Processed header: {}", header.time.to_u32());
+                            continue;
+                        }
+                        _ => {
+                            warn!("Rejected header {}", header.block_hash());
+                            break;
+                        }
+                    }
+                }
+
+                if headers.0.len() != 2000 {
+                    let tip_hash = node_state.get_tip_state().block_hash;
+                    return (PeerStateMachine::AwaitingInv, vec![create_getblocks_message(tip_hash)]);
+                }
+
+                let best_hash = BlockHash::from_byte_array(node_state.chainman.best_entry().unwrap().block_hash().to_bytes());
+                (PeerStateMachine::AwaitingHeaders, vec![create_getheaders_message(best_hash)])
+            }
+            message => {
+                debug!("Ignoring message: {:?}", message);
+                (PeerStateMachine::AwaitingHeaders, vec![])
+            }
+        }
         PeerStateMachine::AwaitingInv => match event {
             NetworkMessage::Inv(inventory) => {
                 debug!("Received inventory with {} items", inventory.0.len());
@@ -220,10 +256,11 @@ impl BitcoinPeer {
 
         let addr = Address::new(&socket_addr, ServiceFlags::WITNESS);
         info!("Connected to {:?}", addr);
-        let state_machine = PeerStateMachine::AwaitingInv;
-        let our_best = node_state.get_tip_state().block_hash;
-        let getblocks = create_getblocks_message(our_best);
-        writer.send_message(getblocks)?;
+        let state_machine = PeerStateMachine::AwaitingHeaders;
+        let best_hash = BlockHash::from_byte_array(node_state.chainman.best_entry().unwrap().block_hash().to_bytes());
+        let getheaders = create_getheaders_message(best_hash);
+        debug!("sending headers message...");
+        writer.send_message(getheaders)?;
         let peer = BitcoinPeer {
             addr,
             writer: Arc::new(writer),
