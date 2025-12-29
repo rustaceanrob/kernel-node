@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, Once,
     },
     thread::{self, available_parallelism},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bitcoin::{BlockHash, Network, TestnetVersion};
@@ -34,6 +34,8 @@ const TABLE_SLOT: usize = 16;
 const MAX_BUCKETS: usize = 4;
 
 const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+
+const STALE_BLOCK_DURATION: Duration = Duration::from_secs(60 * 20);
 
 configure_me::include_config!();
 
@@ -224,6 +226,7 @@ fn run(
     let peer_source = Arc::clone(&addrman);
     let kill = Arc::new(Mutex::new(None));
     let writer = Arc::clone(&kill);
+    let stale_block_kill = Arc::clone(&kill);
 
     let peer_processing_handler = thread::spawn(move || {
         info!("Starting net processing thread.");
@@ -295,13 +298,25 @@ fn run(
 
     let block_processing_handler = thread::spawn(move || {
         info!("Starting block processing thread.");
+        let mut last_block = Instant::now();
         while running_block.load(Ordering::SeqCst) {
             match block_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(block) => {
                     debug!("Validating block.");
+                    last_block = Instant::now();
                     let _ = chainman.process_block(&block);
                 }
-                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    if last_block.elapsed() > STALE_BLOCK_DURATION {
+                        last_block = Instant::now();
+                        info!("Potential stale block. Finding a new peer.");
+                        let mut peer_lock = stale_block_kill.lock().unwrap();
+                        if let Some(conn) = peer_lock.deref_mut() {
+                            let _ = conn.shutdown();
+                        }
+                    }
+                    continue;
+                }
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
