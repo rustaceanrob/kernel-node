@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Bitcoin Kernel Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential cmake pkgconf python3 libevent-dev libboost-dev capnproto libcapnp-dev
+      - name: Format Check
+        run: |
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo check --all-features
