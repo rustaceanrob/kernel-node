@@ -6,13 +6,19 @@ use std::{
 };
 
 use bitcoin::{BlockHash, Network};
-use bitcoinkernel::{ChainstateManager, Context, ProcessBlockHeaderResult, ValidationMode, core::BlockHashExt, prelude::BlockValidationStateExt};
+use bitcoinkernel::{
+    core::BlockHashExt, prelude::BlockValidationStateExt, ChainstateManager, Context,
+    ProcessBlockHeaderResult, ValidationMode,
+};
 use log::{debug, info, warn};
 use p2p::{
     handshake::ConnectionConfig,
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
     p2p_message_types::{
-        Address, ProtocolVersion, ServiceFlags, message::{AddrV2Payload, InventoryPayload, NetworkMessage}, message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory}, message_network::UserAgent
+        message::{AddrV2Payload, InventoryPayload, NetworkMessage},
+        message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory},
+        message_network::UserAgent,
+        Address, ProtocolVersion, ServiceFlags,
     },
 };
 
@@ -128,9 +134,13 @@ pub fn process_message(
         PeerStateMachine::AwaitingHeaders => match event {
             NetworkMessage::Headers(headers) => {
                 for header in &headers.0 {
-                    let result = node_state.chainman.process_block_header(&bitcoin_header_to_kernel_header(&header));
+                    let result = node_state
+                        .chainman
+                        .process_block_header(&bitcoin_header_to_kernel_header(header));
                     match result {
-                        ProcessBlockHeaderResult::Success(state) if state.mode() == ValidationMode::Valid => {
+                        ProcessBlockHeaderResult::Success(state)
+                            if state.mode() == ValidationMode::Valid =>
+                        {
                             debug!("Processed header: {}", header.time.to_u32());
                             continue;
                         }
@@ -143,17 +153,30 @@ pub fn process_message(
 
                 if headers.0.len() != 2000 {
                     let tip_hash = node_state.get_tip_state().block_hash;
-                    return (PeerStateMachine::AwaitingInv, vec![create_getblocks_message(tip_hash)]);
+                    return (
+                        PeerStateMachine::AwaitingInv,
+                        vec![create_getblocks_message(tip_hash)],
+                    );
                 }
 
-                let best_hash = BlockHash::from_byte_array(node_state.chainman.best_entry().unwrap().block_hash().to_bytes());
-                (PeerStateMachine::AwaitingHeaders, vec![create_getheaders_message(best_hash)])
+                let best_hash = BlockHash::from_byte_array(
+                    node_state
+                        .chainman
+                        .best_entry()
+                        .unwrap()
+                        .block_hash()
+                        .to_bytes(),
+                );
+                (
+                    PeerStateMachine::AwaitingHeaders,
+                    vec![create_getheaders_message(best_hash)],
+                )
             }
             message => {
                 debug!("Ignoring message: {:?}", message);
                 (PeerStateMachine::AwaitingHeaders, vec![])
             }
-        }
+        },
         PeerStateMachine::AwaitingInv => match event {
             NetworkMessage::Inv(inventory) => {
                 debug!("Received inventory with {} items", inventory.0.len());
@@ -257,7 +280,14 @@ impl BitcoinPeer {
         let addr = Address::new(&socket_addr, ServiceFlags::WITNESS);
         info!("Connected to {:?}", addr);
         let state_machine = PeerStateMachine::AwaitingHeaders;
-        let best_hash = BlockHash::from_byte_array(node_state.chainman.best_entry().unwrap().block_hash().to_bytes());
+        let best_hash = BlockHash::from_byte_array(
+            node_state
+                .chainman
+                .best_entry()
+                .unwrap()
+                .block_hash()
+                .to_bytes(),
+        );
         let getheaders = create_getheaders_message(best_hash);
         debug!("sending headers message...");
         writer.send_message(getheaders)?;
