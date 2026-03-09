@@ -17,9 +17,9 @@ use bitcoinkernel::{
 };
 use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
 use kernel_node::{
-    echo_capnp::echo,
     ipc::IpcInterface,
     kernel_util::{ChainExt, DirnameExt},
+    server_capnp::server,
 };
 use log::{debug, error, info, warn};
 use p2p::{
@@ -348,6 +348,7 @@ fn main() {
         setup_logging();
     });
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let ipc_shutdown = shutdown_tx.clone();
 
     let tip_state = Arc::new(Mutex::new(TipState::default()));
 
@@ -420,7 +421,8 @@ fn main() {
                             capnp_rpc::rpc_twoparty_capnp::Side::Server,
                             Default::default(),
                         );
-                        let client: echo::Client = capnp_rpc::new_client(IpcInterface);
+                        let client: server::Client =
+                            capnp_rpc::new_client(IpcInterface::new(ipc_shutdown.clone()));
                         let rpc_system =
                             capnp_rpc::RpcSystem::new(Box::new(network), Some(client.client));
                         tokio::task::spawn_local(rpc_system);

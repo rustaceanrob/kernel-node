@@ -1,5 +1,5 @@
 use clap::Parser;
-use kernel_node::echo_capnp::echo;
+use kernel_node::server_capnp::server;
 use tokio::net::UnixStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -14,6 +14,8 @@ struct Args {
 enum Commands {
     /// Echo a message to yourself.
     Echo(Echo),
+    /// Terminate the server.
+    Shutdown,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -42,7 +44,7 @@ fn main() {
             Default::default(),
         );
         let mut rpc_system = capnp_rpc::RpcSystem::new(Box::new(network), None);
-        let client: echo::Client =
+        let client: server::Client =
             rpc_system.bootstrap(capnp_rpc::rpc_twoparty_capnp::Side::Server);
         tokio::task::spawn_local(rpc_system);
         match cli.commands {
@@ -59,6 +61,10 @@ fn main() {
                     .to_string()
                     .unwrap();
                 println!("{result}");
+            }
+            Commands::Shutdown => {
+                let shutdown_req = client.shutdown_request();
+                shutdown_req.send().promise.await.unwrap();
             }
         }
     }))
