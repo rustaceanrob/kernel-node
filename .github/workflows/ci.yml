@@ -23,3 +23,7 @@ jobs:
           cargo fmt -- --check
           cargo clippy --all-targets -- -D warnings
           cargo check --all-features
+      - name: MSRV
+        run: |
+          cargo install cargo-msrv@0.19.2
+          cargo msrv verify
