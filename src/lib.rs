@@ -1,3 +1,4 @@
+pub mod daemonize;
 pub mod ipc;
 pub mod kernel_util;
 pub mod peer;
