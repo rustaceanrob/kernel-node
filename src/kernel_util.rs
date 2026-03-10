@@ -24,9 +24,10 @@ pub trait DirnameExt {
     fn data_dir(&self) -> String;
 }
 
-impl DirnameExt for String {
+impl<S: AsRef<str>> DirnameExt for S {
     fn data_dir(&self) -> String {
-        let path = match self.strip_prefix("~/") {
+        let string = self.as_ref();
+        let path = match string.strip_prefix("~/") {
             Some(rest) => match home_dir() {
                 Some(mut home) => {
                     home.push(rest);
@@ -34,7 +35,7 @@ impl DirnameExt for String {
                 }
                 None => PathBuf::from(rest),
             },
-            None => PathBuf::from(self),
+            None => PathBuf::from(string),
         };
         // Create directories if they don't exist
         fs::create_dir_all(&path).unwrap();
