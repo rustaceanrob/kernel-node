@@ -406,9 +406,10 @@ fn main() {
         rt.block_on(async move {
             tokio::task::LocalSet::new()
                 .run_until(async move {
-                    let _ = std::fs::remove_file("./node.sock");
+                    let sock_file = data_dir + "/node.sock";
+                    let _ = std::fs::remove_file(&sock_file);
                     info!("Listening for incoming IPC requests");
-                    let unix_socket = UnixListener::bind("./node.sock").unwrap();
+                    let unix_socket = UnixListener::bind(sock_file).unwrap();
                     loop {
                         let (stream, _) = unix_socket.accept().await.unwrap();
                         info!("Handling inbound IPC call");
