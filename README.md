@@ -27,3 +27,11 @@ Arguments:
         --datadir    Data directory for blockchain and configuration.
         --connect    Connect only to this node (format: ip:port or hostname:port)
 ```
+
+## MSRV
+
+The crate binaries will compile with a compiler version of **1.84.0** or greater.
+
+## Platform Support
+
+The developers of `kernel-node` and CI jobs are on Unix-like systems.
