@@ -1,6 +1,5 @@
 use bitcoin::{block::Checked, consensus::encode, Network, TestnetVersion};
 use bitcoinkernel::{core::BlockHashExt, BlockTreeEntry, ChainType};
-use home::home_dir;
 use std::{fs, path::PathBuf};
 
 pub trait ChainExt {
@@ -20,6 +19,11 @@ impl ChainExt for Network {
     }
 }
 
+fn unix_home_dir() -> PathBuf {
+    let home_dir_string = std::env::var("HOME").unwrap();
+    home_dir_string.parse::<PathBuf>().unwrap()
+}
+
 pub trait DirnameExt {
     fn data_dir(&self) -> String;
 }
@@ -28,13 +32,10 @@ impl<S: AsRef<str>> DirnameExt for S {
     fn data_dir(&self) -> String {
         let string = self.as_ref();
         let path = match string.strip_prefix("~/") {
-            Some(rest) => match home_dir() {
-                Some(mut home) => {
-                    home.push(rest);
-                    home
-                }
-                None => PathBuf::from(rest),
-            },
+            Some(rest) => {
+                let home_path = unix_home_dir();
+                home_path.join(rest)
+            }
             None => PathBuf::from(string),
         };
         // Create directories if they don't exist
