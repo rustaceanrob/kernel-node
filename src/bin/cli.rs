@@ -27,7 +27,7 @@ enum Commands {
     /// Echo a message to yourself.
     Echo(Echo),
     /// Terminate the server.
-    Shutdown,
+    Stop,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -76,7 +76,7 @@ fn main() {
                     .unwrap();
                 println!("{result}");
             }
-            Commands::Shutdown => {
+            Commands::Stop => {
                 let shutdown_req = client.shutdown_request();
                 shutdown_req.send().promise.await.unwrap();
             }
