@@ -15,7 +15,10 @@ use bitcoinkernel::{
     core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManagerBuilder,
     Context, ContextBuilder, Log, Logger, SynchronizationState, ValidationMode,
 };
-use kernel_node::peer::{BitcoinPeer, NodeState, TipState};
+use kernel_node::{
+    daemonize::Daemonize,
+    peer::{BitcoinPeer, NodeState, TipState},
+};
 use kernel_node::{
     ipc::IpcInterface,
     kernel_util::{ChainExt, DirnameExt},
@@ -347,6 +350,12 @@ fn main() {
     START.call_once(|| {
         setup_logging();
     });
+    if config.daemon {
+        let daemonize = Daemonize::new(config.datadir.data_dir());
+        info!("Kernel node starting...");
+        daemonize.fork().unwrap();
+    }
+
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let ipc_shutdown = shutdown_tx.clone();
 

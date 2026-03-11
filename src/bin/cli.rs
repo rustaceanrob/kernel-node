@@ -79,6 +79,7 @@ fn main() {
             Commands::Stop => {
                 let shutdown_req = client.shutdown_request();
                 shutdown_req.send().promise.await.unwrap();
+                println!("Kernel node stopping...");
             }
         }
     }))
