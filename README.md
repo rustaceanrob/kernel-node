@@ -11,6 +11,10 @@ connection to this peer happens to fail for some reason, a new peer will be sele
 A direct connection can also be selected from the command line. See `--help` for
 this.
 
+## Quick Start
+
+If you have the dependencies to build Bitcoin Core with IPC and a usual Rust program, you can build `kernel-node`. For build instructions, see the [build documntation](./doc/build.md).
+
 To run on e.g. signet:
 
 ```
@@ -26,6 +30,7 @@ Arguments:
         --network    Which Bitcoin network to use.
         --datadir    Data directory for blockchain and configuration.
         --connect    Connect only to this node (format: ip:port or hostname:port)
+        --daemon     Run the server as a daemon
 ```
 
 ## MSRV
