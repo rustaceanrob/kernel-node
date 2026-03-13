@@ -364,7 +364,6 @@ fn main() {
     let network = config.network.parse::<Network>().expect("invalid network");
     let context = create_context(network.chain_type(), shutdown_tx.clone(), &tip_state);
 
-    ctrlc::set_handler(move || shutdown_tx.send(()).unwrap()).unwrap();
     let data_dir = config.datadir.data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman_builder = ChainstateManagerBuilder::new(&context, &data_dir, &blocks_dir)
@@ -420,7 +419,16 @@ fn main() {
                     info!("Listening for incoming IPC requests");
                     let unix_socket = UnixListener::bind(sock_file).unwrap();
                     loop {
-                        let (stream, _) = unix_socket.accept().await.unwrap();
+                        let stream = tokio::select! {
+                            unix_bind_res = unix_socket.accept() => {
+                                unix_bind_res.unwrap().0
+                            }
+                            _ctrl_c = tokio::signal::ctrl_c() => {
+                                info!("Received shutdown signal");
+                                shutdown_tx.clone().send(()).unwrap();
+                                return;
+                            }
+                        };
                         info!("Handling inbound IPC call");
                         let (reader, writer) = stream.into_split();
                         let buf_reader = futures::io::BufReader::new(reader.compat());
