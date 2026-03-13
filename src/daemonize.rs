@@ -3,7 +3,7 @@ use std::{
     os::fd::IntoRawFd,
 };
 
-const MASK_OCTAL: u32 = 0o027;
+const MASK_OCTAL: libc::mode_t = 0o027;
 const DEV_NULL: &str = "/dev/null";
 
 pub struct Daemonize {
