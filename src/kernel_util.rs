@@ -1,4 +1,4 @@
-use bitcoin::{block::Checked, consensus::encode, Network, TestnetVersion};
+use bitcoin::{consensus::encode, hashes::Hash, Network};
 use bitcoinkernel::{core::BlockHashExt, BlockTreeEntry, ChainType};
 use std::{fs, path::PathBuf};
 
@@ -11,10 +11,9 @@ impl ChainExt for Network {
         match self {
             Network::Bitcoin => ChainType::Mainnet,
             Network::Signet => ChainType::Signet,
-            Network::Testnet(TestnetVersion::V3) => ChainType::Testnet,
-            Network::Testnet(TestnetVersion::V4) => ChainType::Testnet4,
+            Network::Testnet => ChainType::Testnet,
+            Network::Testnet4 => ChainType::Testnet4,
             Network::Regtest => ChainType::Regtest,
-            _ => unimplemented!("unsupported network"),
         }
     }
 }
@@ -46,13 +45,31 @@ impl<S: AsRef<str>> DirnameExt for S {
     }
 }
 
-pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block<Checked>) -> bitcoinkernel::Block {
+pub trait NetworkExt {
+    // The P2P port for a given [`Network`].
+    fn default_p2p_port(self) -> u16;
+}
+
+impl NetworkExt for Network {
+    // The P2P port for a given [`Network`].
+    fn default_p2p_port(self) -> u16 {
+        match &self {
+            Self::Bitcoin => 8333,
+            Self::Signet => 38333,
+            Self::Testnet => 18333,
+            Self::Testnet4 => 48333,
+            Self::Regtest => 18444,
+        }
+    }
+}
+
+pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::Block {
     let ser_block = encode::serialize(block);
     bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
 }
 
 pub fn bitcoin_header_to_kernel_header(
-    header: &bitcoin::BlockHeader,
+    header: &bitcoin::block::Header,
 ) -> bitcoinkernel::BlockHeader {
     let ser_header = encode::serialize(header);
     bitcoinkernel::BlockHeader::new(ser_header.as_slice()).unwrap()
