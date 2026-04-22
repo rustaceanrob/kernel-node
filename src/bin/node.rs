@@ -10,13 +10,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bitcoin::{BlockHash, Network, TestnetVersion};
+use bitcoin::p2p::{
+    address::{AddrV2, AddrV2Message},
+    ServiceFlags,
+};
+use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
     core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManagerBuilder,
     Context, ContextBuilder, Log, Logger, SynchronizationState, ValidationMode,
 };
 use kernel_node::{
     daemonize::Daemonize,
+    kernel_util::NetworkExt,
     peer::{BitcoinPeer, NodeState, TipState},
 };
 use kernel_node::{
@@ -25,10 +30,7 @@ use kernel_node::{
     server_capnp::server,
 };
 use log::{debug, error, info, warn};
-use p2p::{
-    dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS},
-    p2p_message_types::{address::AddrV2, message::AddrV2Payload, NetworkExt, ServiceFlags},
-};
+use p2p::dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS};
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -146,14 +148,9 @@ fn resolve_seeds(network: Network) -> Vec<IpAddr> {
     let seeds: Vec<String> = match network {
         Network::Bitcoin => BITCOIN_SEEDS.into_iter().map(format_hostname).collect(),
         Network::Signet => SIGNET_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Testnet(TestnetVersion::V3) => {
-            TESTNET3_SEEDS.into_iter().map(format_hostname).collect()
-        }
-        Network::Testnet(TestnetVersion::V4) => {
-            TESTNET4_SEEDS.into_iter().map(format_hostname).collect()
-        }
+        Network::Testnet => TESTNET3_SEEDS.into_iter().map(format_hostname).collect(),
+        Network::Testnet4 => TESTNET4_SEEDS.into_iter().map(format_hostname).collect(),
         Network::Regtest => Vec::new(),
-        _ => panic!("unknown network."),
     };
     let mut results = Vec::new();
     for host in seeds {
@@ -173,7 +170,7 @@ fn run(
     connect: Option<SocketAddr>,
     mut node_state: NodeState,
     shutdown_rx: mpsc::Receiver<()>,
-    addr_rx: mpsc::Receiver<AddrV2Payload>,
+    addr_rx: mpsc::Receiver<Vec<AddrV2Message>>,
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
 ) -> std::io::Result<()> {
     let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
@@ -284,7 +281,7 @@ fn run(
             match addr_rx.recv() {
                 Ok(payload) => {
                     let mut addr_lock = addrman.lock().unwrap();
-                    for address in payload.0 {
+                    for address in payload {
                         let record = addrman::Record::new(
                             address.addr,
                             address.port,
