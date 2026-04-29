@@ -2,7 +2,7 @@
 name = "kernel-node"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.84.0"
+rust-version = "1.85.0"
 
 [dependencies]
 # bitcoinkernel = { path = "../rust-bitcoinkernel", version = "0.0.15" }
