@@ -1,6 +1,7 @@
 use bitcoin::{consensus::encode, hashes::Hash, Network};
-use bitcoinkernel::{core::BlockHashExt, BlockTreeEntry, ChainType};
+use bitcoinkernel::{core::BlockHashExt, Block as KernelBlock, BlockTreeEntry, ChainType};
 use std::{fs, path::PathBuf};
+use wallet::silentpayments::Network as WalletNetwork;
 
 pub trait ChainExt {
     fn chain_type(&self) -> ChainType;
@@ -48,6 +49,7 @@ impl<S: AsRef<str>> DirnameExt for S {
 pub trait NetworkExt {
     // The P2P port for a given [`Network`].
     fn default_p2p_port(self) -> u16;
+    fn wallet_network(self) -> WalletNetwork;
 }
 
 impl NetworkExt for Network {
@@ -61,6 +63,21 @@ impl NetworkExt for Network {
             Self::Regtest => 18444,
         }
     }
+
+    fn wallet_network(self) -> WalletNetwork {
+        match self {
+            Self::Bitcoin => WalletNetwork::Mainnet,
+            Self::Regtest => WalletNetwork::Regtest,
+            _ => WalletNetwork::Testnet,
+        }
+    }
+}
+
+pub fn kernel_block_to_bitcoin_block(block: &KernelBlock) -> bitcoin::Block {
+    let raw = block
+        .consensus_encode()
+        .expect("kernel block serialization");
+    encode::deserialize(&raw).expect("kernel block deserialization")
 }
 
 pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::Block {
