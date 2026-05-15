@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/wallet"]
+resolver = "2"
+
 [package]
 name = "kernel-node"
 version = "0.1.0"
@@ -8,13 +12,14 @@ rust-version = "1.85.0"
 # bitcoinkernel = { path = "../rust-bitcoinkernel", version = "0.0.15" }
 bitcoinkernel = "0.2"
 addrman = { package = "bitcoin-address-book", version = "0.1.1" }
-bitcoin = "0.32.8"
+bitcoin = { version = "0.32.8", features = ["rand-std"] }
 p2p = { package = "bitcoin-p2p", git =  "https://github.com/2140-dev/bitcoin-p2p.git", rev = "5dc03375636a10487c7e50659416876c28f58a3b" }
 ## Log and configuration
 configure_me = "0.4.0"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.10"
+wallet = { path = "crates/wallet" }
 ## IPC required dependencies
 capnp = "0.25"
 capnp-rpc = "0.25"

@@ -1,15 +1,19 @@
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 
-use crate::server_capnp;
+use bitcoin::secp256k1::{Parity, PublicKey, SecretKey, XOnlyPublicKey};
+use wallet::silentpayments::{build_receiver, SilentPaymentKeys, Wallet};
+
+use crate::{server_capnp, wallet_capnp};
 
 #[derive(Debug)]
 pub struct IpcInterface {
     tx: mpsc::Sender<()>,
+    state: Arc<Mutex<Wallet>>,
 }
 
 impl IpcInterface {
-    pub fn new(tx: mpsc::Sender<()>) -> Self {
-        Self { tx }
+    pub fn new(tx: mpsc::Sender<()>, state: Arc<Mutex<Wallet>>) -> Self {
+        Self { tx, state }
     }
 }
 
@@ -33,6 +37,108 @@ impl server_capnp::server::Server for IpcInterface {
         self.tx
             .send(())
             .map_err(|_| capnp::Error::failed("could not shutdown server.".to_string()))?;
+        Ok(())
+    }
+
+    async fn make_wallet(
+        self: capnp::capability::Rc<Self>,
+        _: server_capnp::server::MakeWalletParams,
+        mut results: server_capnp::server::MakeWalletResults,
+    ) -> Result<(), capnp::Error> {
+        let client: wallet_capnp::wallet::Client =
+            capnp_rpc::new_client(WalletIpcInterface::new(self.state.clone()));
+        results.get().set_wallet(client);
+        Ok(())
+    }
+}
+
+pub struct WalletIpcInterface {
+    state: Arc<Mutex<Wallet>>,
+}
+
+impl WalletIpcInterface {
+    pub fn new(state: Arc<Mutex<Wallet>>) -> Self {
+        Self { state }
+    }
+}
+
+impl wallet_capnp::wallet::Server for WalletIpcInterface {
+    async fn import_keys(
+        self: capnp::capability::Rc<Self>,
+        params: wallet_capnp::wallet::ImportKeysParams,
+        mut results: wallet_capnp::wallet::ImportKeysResults,
+    ) -> Result<(), capnp::Error> {
+        let p = params.get()?;
+        let scan_bytes = p.get_scan_key()?;
+        let spend_bytes = p.get_spend_key()?;
+
+        let scan_key = SecretKey::from_slice(scan_bytes)
+            .map_err(|e| capnp::Error::failed(format!("invalid scan key: {e}")))?;
+        let spend_xonly = XOnlyPublicKey::from_slice(spend_bytes)
+            .map_err(|e| capnp::Error::failed(format!("invalid spend key: {e}")))?;
+        let spend_key = PublicKey::from_x_only_public_key(spend_xonly, Parity::Even);
+
+        let mut wallet = self.state.lock().unwrap();
+        let receiver = build_receiver(&scan_key, spend_key, wallet.network)
+            .map_err(|e| capnp::Error::failed(format!("invalid key pair: {e}")))?;
+
+        wallet.spend_key = Some(spend_key);
+        wallet.keys = Some(SilentPaymentKeys { receiver, scan_key });
+
+        results.get().set_ok(true);
+        results.get().set_message("keys imported");
+        Ok(())
+    }
+
+    async fn get_balance(
+        self: capnp::capability::Rc<Self>,
+        _: wallet_capnp::wallet::GetBalanceParams,
+        mut results: wallet_capnp::wallet::GetBalanceResults,
+    ) -> Result<(), capnp::Error> {
+        let wallet = self.state.lock().unwrap();
+        let balance = wallet.balance();
+        let scan_height = wallet.scan_height;
+        let utxo_count = wallet.utxo_count() as u32;
+        drop(wallet);
+
+        let mut r = results.get();
+        r.set_sats(balance.to_sat());
+        r.set_scan_height(scan_height);
+        r.set_utxo_count(utxo_count);
+        Ok(())
+    }
+
+    async fn get_history(
+        self: capnp::capability::Rc<Self>,
+        _: wallet_capnp::wallet::GetHistoryParams,
+        mut results: wallet_capnp::wallet::GetHistoryResults,
+    ) -> Result<(), capnp::Error> {
+        let wallet = self.state.lock().unwrap();
+        let history = wallet.history();
+        drop(wallet);
+
+        let text = history
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        results.get().set_entries(&text);
+        Ok(())
+    }
+
+    async fn receive(
+        self: capnp::capability::Rc<Self>,
+        _: wallet_capnp::wallet::ReceiveParams,
+        mut results: wallet_capnp::wallet::ReceiveResults,
+    ) -> Result<(), capnp::Error> {
+        let wallet = self.state.lock().unwrap();
+        let address = wallet
+            .receive_address()
+            .ok_or_else(|| capnp::Error::failed("no keys imported".to_string()))?;
+        drop(wallet);
+
+        results.get().set_address(&address);
         Ok(())
     }
 }

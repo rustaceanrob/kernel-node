@@ -1,0 +1,10 @@
+[package]
+name = "wallet"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+silentpayments = { version = "0.5", features = ["receiving", "encode"] }
+bitcoin = "0.32.8"
+bitcoinkernel = "0.2"
+log = "0.4"

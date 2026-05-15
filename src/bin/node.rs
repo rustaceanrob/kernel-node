@@ -16,23 +16,22 @@ use bitcoin::p2p::{
 };
 use bitcoin::{hashes::Hash, BlockHash, Network};
 use bitcoinkernel::{
-    core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManagerBuilder,
-    Context, ContextBuilder, Log, Logger, SynchronizationState, ValidationMode,
+    core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManager,
+    ChainstateManagerBuilder, Context, ContextBuilder, Log, Logger, SynchronizationState,
+    ValidationMode,
 };
 use kernel_node::{
     daemonize::Daemonize,
-    kernel_util::NetworkExt,
-    peer::{BitcoinPeer, NodeState, TipState},
-};
-use kernel_node::{
     ipc::IpcInterface,
-    kernel_util::{ChainExt, DirnameExt},
+    kernel_util::{ChainExt, DirnameExt, NetworkExt},
+    peer::{BitcoinPeer, NodeState, TipState},
     server_capnp::server,
 };
 use log::{debug, error, info, warn};
 use p2p::dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS};
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use wallet::silentpayments::Wallet;
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -44,17 +43,66 @@ const STALE_BLOCK_DURATION: Duration = Duration::from_secs(60 * 20);
 
 configure_me::include_config!();
 
+fn scan_kernel_block(
+    chainman: &ChainstateManager,
+    kernel_block: &bitcoinkernel::Block,
+    entry: &bitcoinkernel::BlockTreeEntry,
+    wallet: &Arc<Mutex<Wallet>>,
+) {
+    let block_height = entry.height() as u32;
+
+    let spent_outputs = match chainman.read_spent_outputs(entry) {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("read_spent_outputs failed at height {block_height}: {e}");
+            return;
+        }
+    };
+
+    let count = wallet
+        .lock()
+        .unwrap()
+        .scan_block(kernel_block, &spent_outputs, block_height);
+    if count > 0 {
+        info!(
+            "Wallet: found {} silent payment(s) at height {}",
+            count, block_height
+        );
+    }
+}
+
 fn create_context(
     chain_type: ChainType,
     shutdown_tx: mpsc::Sender<()>,
     tip_state: &Arc<Mutex<TipState>>,
+    wallet: Arc<Mutex<Wallet>>,
+    chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>>,
 ) -> Arc<Context> {
     let shutdown_triggered = Arc::new(AtomicBool::new(false));
     let shutdown_triggered_clone = Arc::clone(&shutdown_triggered);
     let shutdown_tx_clone = shutdown_tx.clone();
     let tip_state_clone = tip_state.clone();
+    let wallet_for_disconnect = Arc::clone(&wallet);
     Arc::new(ContextBuilder::new()
         .chain_type(chain_type)
+        .with_block_connected_validation(move |block: bitcoinkernel::Block, entry: bitcoinkernel::BlockTreeEntry<'_>| {
+            if wallet.lock().unwrap().keys.is_none() {
+                return;
+            }
+            let Some(chainman) = chainman_holder.get() else { return };
+            scan_kernel_block(chainman.as_ref(), &block, &entry, &wallet);
+        })
+        .with_block_disconnected_validation(move |block: bitcoinkernel::Block, entry: bitcoinkernel::BlockTreeEntry<'_>| {
+            if wallet_for_disconnect.lock().unwrap().keys.is_none() {
+                return;
+            }
+            let height = entry.height();
+            wallet_for_disconnect
+                .lock()
+                .unwrap()
+                .process_disconnect(&block);
+            info!("Wallet: disconnected block at height {}", height);
+        })
         .with_block_tip_notification(|state, hash: bitcoinkernel::BlockHash, _| {
                 let hash = BlockHash::from_byte_array(hash.into());
                 match state {
@@ -107,7 +155,7 @@ struct KernelLog {}
 impl Log for KernelLog {
     fn log(&self, message: &str) {
         log::info!(
-            target: "bitcoinkernel", 
+            target: "bitcoinkernel",
             "{}", message.strip_suffix("\r\n").or_else(|| message.strip_suffix('\n')).unwrap_or(message));
     }
 }
@@ -359,7 +407,16 @@ fn main() {
     let tip_state = Arc::new(Mutex::new(TipState::default()));
 
     let network = config.network.parse::<Network>().expect("invalid network");
-    let context = create_context(network.chain_type(), shutdown_tx.clone(), &tip_state);
+    let wallet = Arc::new(Mutex::new(Wallet::new(network.wallet_network())));
+    let chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let context = create_context(
+        network.chain_type(),
+        shutdown_tx.clone(),
+        &tip_state,
+        Arc::clone(&wallet),
+        Arc::clone(&chainman_holder),
+    );
 
     let data_dir = config.datadir.data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
@@ -371,6 +428,10 @@ fn main() {
                 .unwrap(),
         );
     let chainman = Arc::new(chainman_builder.build().unwrap());
+    chainman_holder
+        .set(Arc::clone(&chainman))
+        .ok()
+        .expect("chainman holder already set");
 
     let (block_tx, block_rx) = mpsc::sync_channel(1);
     let (addr_tx, addr_rx) = mpsc::channel();
@@ -403,6 +464,7 @@ fn main() {
         return;
     }
 
+    let wallet_for_ipc = Arc::clone(&wallet);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -427,6 +489,7 @@ fn main() {
                             }
                         };
                         info!("Handling inbound IPC call");
+                        let state = Arc::clone(&wallet_for_ipc);
                         let (reader, writer) = stream.into_split();
                         let buf_reader = futures::io::BufReader::new(reader.compat());
                         let buf_writer = futures::io::BufWriter::new(writer.compat_write());
@@ -437,7 +500,7 @@ fn main() {
                             Default::default(),
                         );
                         let client: server::Client =
-                            capnp_rpc::new_client(IpcInterface::new(ipc_shutdown.clone()));
+                            capnp_rpc::new_client(IpcInterface::new(ipc_shutdown.clone(), state));
                         let rpc_system =
                             capnp_rpc::RpcSystem::new(Box::new(network), Some(client.client));
                         tokio::task::spawn_local(rpc_system);
