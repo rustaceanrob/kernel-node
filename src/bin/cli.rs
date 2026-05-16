@@ -1,7 +1,7 @@
 use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1, SecretKey, XOnlyPublicKey};
 use clap::Parser;
-use kernel_node::kernel_util::DirnameExt;
+use kernel_node::ext::DirnameExt;
 use kernel_node::server_capnp::server;
 use tokio::net::UnixStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};

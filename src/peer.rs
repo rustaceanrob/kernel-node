@@ -25,7 +25,7 @@ use p2p::{
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
 };
 
-use crate::kernel_util::{bitcoin_block_to_kernel_block, bitcoin_header_to_kernel_header};
+use crate::ext::{CrateBlockExt, CrateHeaderExt};
 
 const PROTOCOL_VERSION: ProtocolVersion = 70015;
 const MAX_LOCATOR_HASHES: usize = 101;
@@ -169,10 +169,9 @@ pub fn process_message(
     match state_machine {
         PeerStateMachine::AwaitingHeaders => match event {
             NetworkMessage::Headers(headers) => {
-                for header in &headers {
-                    let result = node_state
-                        .chainman
-                        .process_block_header(&bitcoin_header_to_kernel_header(header));
+                let msg_len = headers.len();
+                for header in headers.into_iter() {
+                    let result = node_state.chainman.process_block_header(&header.convert());
                     match result {
                         ProcessBlockHeaderResult::Success(state)
                             if state.mode() == ValidationMode::Valid =>
@@ -187,7 +186,7 @@ pub fn process_message(
                     }
                 }
 
-                if headers.len() != 2000 {
+                if msg_len != 2000 {
                     let locators = build_block_locators(node_state.chainman.active_chain().tip());
                     return (
                         PeerStateMachine::AwaitingInv,
@@ -241,7 +240,7 @@ pub fn process_message(
                 block_state.peer_inventory.remove(&block.block_hash());
                 block_state
                     .block_buffer
-                    .insert(prev_blockhash, bitcoin_block_to_kernel_block(&block));
+                    .insert(prev_blockhash, block.convert());
 
                 while let Some(next_block) = block_state
                     .block_buffer
