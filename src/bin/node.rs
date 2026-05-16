@@ -22,8 +22,8 @@ use bitcoinkernel::{
 };
 use kernel_node::{
     daemonize::Daemonize,
+    ext::{ChainExt, DirnameExt, NetworkExt},
     ipc::IpcInterface,
-    kernel_util::{ChainExt, DirnameExt, NetworkExt},
     peer::{BitcoinPeer, NodeState, TipState},
     server_capnp::server,
 };

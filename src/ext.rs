@@ -73,25 +73,47 @@ impl NetworkExt for Network {
     }
 }
 
-pub fn kernel_block_to_bitcoin_block(block: &KernelBlock) -> bitcoin::Block {
-    let raw = block
-        .consensus_encode()
-        .expect("kernel block serialization");
-    encode::deserialize(&raw).expect("kernel block deserialization")
+pub trait KernelBlockExt {
+    fn convert(self) -> bitcoin::Block;
 }
 
-pub fn bitcoin_block_to_kernel_block(block: &bitcoin::Block) -> bitcoinkernel::Block {
-    let ser_block = encode::serialize(block);
-    bitcoinkernel::Block::try_from(ser_block.as_slice()).unwrap()
+impl KernelBlockExt for KernelBlock {
+    fn convert(self) -> bitcoin::Block {
+        encode::deserialize(
+            &self
+                .consensus_encode()
+                .expect("block has valid serialization."),
+        )
+        .expect("block has valid serialization.")
+    }
 }
 
-pub fn bitcoin_header_to_kernel_header(
-    header: &bitcoin::block::Header,
-) -> bitcoinkernel::BlockHeader {
-    let ser_header = encode::serialize(header);
-    bitcoinkernel::BlockHeader::new(ser_header.as_slice()).unwrap()
+pub trait CrateBlockExt {
+    fn convert(self) -> KernelBlock;
 }
 
-pub fn get_block_hash(index: BlockTreeEntry) -> bitcoin::BlockHash {
-    bitcoin::BlockHash::from_byte_array(index.block_hash().to_bytes())
+impl CrateBlockExt for bitcoin::Block {
+    fn convert(self) -> KernelBlock {
+        KernelBlock::try_from(encode::serialize(&self).as_slice()).unwrap()
+    }
+}
+
+pub trait CrateHeaderExt {
+    fn convert(self) -> bitcoinkernel::BlockHeader;
+}
+
+impl CrateHeaderExt for bitcoin::block::Header {
+    fn convert(self) -> bitcoinkernel::BlockHeader {
+        bitcoinkernel::BlockHeader::new(encode::serialize(&self).as_slice()).unwrap()
+    }
+}
+
+pub trait GetBlockHashExt {
+    fn block_hash(&self) -> bitcoin::BlockHash;
+}
+
+impl GetBlockHashExt for BlockTreeEntry<'_> {
+    fn block_hash(&self) -> bitcoin::BlockHash {
+        bitcoin::BlockHash::from_byte_array(self.block_hash().to_bytes())
+    }
 }
