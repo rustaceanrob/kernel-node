@@ -25,7 +25,10 @@ use p2p::{
     net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
 };
 
-use crate::ext::{CrateBlockExt, CrateHeaderExt};
+use crate::{
+    ext::{CrateBlockExt, CrateHeaderExt},
+    logging::Category,
+};
 
 const PROTOCOL_VERSION: ProtocolVersion = 70015;
 const MAX_LOCATOR_HASHES: usize = 101;
@@ -155,12 +158,12 @@ pub fn process_message(
 ) -> (PeerStateMachine, Vec<NetworkMessage>) {
     // Always process the ping first as a special case.
     if let NetworkMessage::Ping(nonce) = event {
-        info!("Received ping, responding pong.");
+        info!(target: Category::NET, "Received ping, responding pong.");
         return (state_machine, vec![NetworkMessage::Pong(nonce)]);
     }
 
     if let NetworkMessage::AddrV2(payload) = event {
-        info!("Received {} net addresses", payload.len());
+        info!(target: Category::NET, "Received {} net addresses", payload.len());
         // If the address manager has a full queue these net addresses should be dropped.
         let _ = node_state.addr_tx.send(payload);
         return (state_machine, vec![]);
@@ -176,11 +179,11 @@ pub fn process_message(
                         ProcessBlockHeaderResult::Success(state)
                             if state.mode() == ValidationMode::Valid =>
                         {
-                            debug!("Processed header: {}", header.time);
+                            debug!(target: Category::KERNEL, "Processed header: {}", header.time);
                             continue;
                         }
                         _ => {
-                            warn!("Rejected header {}", header.block_hash());
+                            warn!(target: Category::KERNEL, "Rejected header {}", header.block_hash());
                             break;
                         }
                     }
@@ -201,13 +204,13 @@ pub fn process_message(
                 )
             }
             message => {
-                debug!("Ignoring message: {:?}", message);
+                debug!(target: Category::NET, "Ignoring message: {:?}", message);
                 (PeerStateMachine::AwaitingHeaders, vec![])
             }
         },
         PeerStateMachine::AwaitingInv => match event {
             NetworkMessage::Inv(inventory) => {
-                debug!("Received inventory with {} items", inventory.len());
+                debug!(target: Category::NET, "Received inventory with {} items", inventory.len());
                 let block_hashes: Vec<bitcoin::BlockHash> = inventory
                     .iter()
                     .filter_map(|inv| match inv {
@@ -217,7 +220,7 @@ pub fn process_message(
                     .collect();
 
                 if !block_hashes.is_empty() {
-                    debug!("Requesting {} blocks", block_hashes.len());
+                    debug!(target: Category::NET, "Requesting {} blocks", block_hashes.len());
                     (
                         PeerStateMachine::AwaitingBlock(AwaitingBlock {
                             peer_inventory: block_hashes.iter().cloned().collect(),
@@ -230,7 +233,7 @@ pub fn process_message(
                 }
             }
             message => {
-                debug!("Ignoring message: {:?}", message);
+                debug!(target: Category::NET, "Ignoring message: {:?}", message);
                 (PeerStateMachine::AwaitingInv, vec![])
             }
         },
@@ -247,7 +250,7 @@ pub fn process_message(
                     .remove(&node_state.get_tip_state().block_hash)
                 {
                     if let Err(err) = node_state.block_tx.send(next_block) {
-                        debug!("Encountered error on block send: {}", err);
+                        debug!(target: Category::NODE, "Encountered error on block send: {}", err);
                         return (PeerStateMachine::AwaitingBlock(block_state), vec![]);
                     }
                 }
@@ -267,7 +270,7 @@ pub fn process_message(
                 }
             }
             message => {
-                debug!("Ignoring message: {:?}", message);
+                debug!(target: Category::NET, "Ignoring message: {:?}", message);
                 (PeerStateMachine::AwaitingBlock(block_state), vec![])
             }
         },
@@ -304,9 +307,9 @@ impl BitcoinPeer {
         let (writer, reader, _) = conf.open_connection(socket_addr, TimeoutParams::new())?;
 
         let addr = Address::new(&socket_addr, ServiceFlags::WITNESS);
-        info!("Connected to {:?}", addr);
+        info!(target: Category::NET, "Connected to {:?}", addr);
         let locators = build_block_locators(node_state.chainman.best_entry().unwrap());
-        debug!("sending headers message...");
+        debug!(target: Category::NET, "Sending headers message...");
         writer.send_message(create_getheaders_message(locators))?;
         let peer = BitcoinPeer {
             addr,

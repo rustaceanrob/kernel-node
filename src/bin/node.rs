@@ -24,6 +24,7 @@ use kernel_node::{
     daemonize::Daemonize,
     ext::{ChainExt, DirnameExt, NetworkExt},
     ipc::IpcInterface,
+    logging::Category,
     peer::{BitcoinPeer, NodeState, TipState},
     server_capnp::server,
 };
@@ -54,7 +55,7 @@ fn scan_kernel_block(
     let spent_outputs = match chainman.read_spent_outputs(entry) {
         Ok(u) => u,
         Err(e) => {
-            warn!("read_spent_outputs failed at height {block_height}: {e}");
+            warn!(target: Category::WALLET, "Reading spent outputs failed at height {block_height}: {e}");
             return;
         }
     };
@@ -65,7 +66,8 @@ fn scan_kernel_block(
         .scan_block(kernel_block, &spent_outputs, block_height);
     if count > 0 {
         info!(
-            "Wallet: found {} silent payment(s) at height {}",
+            target: Category::WALLET,
+            "Found {} silent payment(s) at height {}",
             count, block_height
         );
     }
@@ -101,25 +103,25 @@ fn create_context(
                 .lock()
                 .unwrap()
                 .process_disconnect(&block);
-            info!("Wallet: disconnected block at height {}", height);
+            info!(target: Category::WALLET, "Disconnected block at height {}", height);
         })
         .with_block_tip_notification(|state, hash: bitcoinkernel::BlockHash, _| {
                 let hash = BlockHash::from_byte_array(hash.into());
                 match state {
-                    SynchronizationState::InitDownload => debug!("Received new block tip {} during IBD.", hash),
-                    SynchronizationState::PostInit => info!("Received new block {}", hash),
-                    SynchronizationState::InitReindex => debug!("Moved new block tip {} during reindex.", hash),
+                    SynchronizationState::InitDownload => debug!(target: Category::KERNEL, "Received new block tip {} during IBD.", hash),
+                    SynchronizationState::PostInit => debug!(target: Category::KERNEL, "Received new block {}", hash),
+                    SynchronizationState::InitReindex => debug!(target: Category::KERNEL, "Moved new block tip {} during reindex.", hash),
                 };
         })
         .with_header_tip_notification(|state, height, timestamp, presync| {
                 match state {
-                    SynchronizationState::InitDownload => debug!("Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
-                    SynchronizationState::PostInit => info!("Received new header tip at height {} and time {}. Presync mode: {}", height, timestamp, presync),
-                    SynchronizationState::InitReindex => debug!("Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::InitDownload => debug!(target: Category::KERNEL, "Received new header tip during IBD at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::PostInit => info!(target: Category::KERNEL, "Received new header tip at height {} and time {}. Presync mode: {}", height, timestamp, presync),
+                    SynchronizationState::InitReindex => debug!(target: Category::KERNEL, "Moved to new header tip during reindex at height {} and time {}. Presync mode: {}", height, timestamp, presync),
                 }
         })
         .with_progress_notification(|title, progress, resume_possible| {
-                warn!("Made progress {}: {}. Can resume: {}", title, progress, resume_possible)
+                warn!(target: Category::KERNEL, "Made progress {}: {}. Can resume: {}", title, progress, resume_possible)
         })
         .with_warning_set_notification(|_warning, _message| {})
         .with_warning_unset_notification(|_warning| {})
@@ -127,10 +129,10 @@ fn create_context(
                 if !shutdown_triggered.swap(true, Ordering::SeqCst) {
                     shutdown_tx.send(()).expect("failed to send shutdown signal");
                 }
-                error!("Fatal flush error encountered: {}", message);
+                error!(target: Category::KERNEL, "Fatal flush error encountered: {}", message);
         })
         .with_fatal_error_notification(move |message| {
-                error!("Fatal error encountered: {}", message);
+                error!(target: Category::KERNEL, "Fatal error encountered: {}", message);
                 if !shutdown_triggered_clone.swap(true, Ordering::SeqCst) {
                     shutdown_tx_clone.send(()).expect("failed to send shutdown signal");
                 }
@@ -140,10 +142,10 @@ fn create_context(
             match state.mode() {
                 ValidationMode::Valid => {
                     let hash = bitcoin::BlockHash::from_byte_array(block.hash().into());
-                    log::debug!("Validation interface: Successfully checked block: {}", hash);
+                    log::debug!(target: Category::KERNEL, "Validation interface: Successfully checked block: {}", hash);
                     tip_state_clone.lock().unwrap().block_hash = hash;
                 }
-                _ => error!("Received an invalid block!"),
+                _ => error!(target: Category::KERNEL, "Received an invalid block!"),
             }
         })
         .build()
@@ -155,7 +157,7 @@ struct KernelLog {}
 impl Log for KernelLog {
     fn log(&self, message: &str) {
         log::info!(
-            target: "bitcoinkernel",
+            target: Category::KERNEL,
             "{}", message.strip_suffix("\r\n").or_else(|| message.strip_suffix('\n')).unwrap_or(message));
     }
 }
@@ -242,7 +244,7 @@ fn run(
         }
         None => {
             let addresses = resolve_seeds(network);
-            info!("{} addresses resolved from the dns seeds", addresses.len());
+            info!(target: Category::NET, "Resolved {} addresses from DNS seeds", addresses.len());
             for addr in &addresses {
                 let record = match addr {
                     IpAddr::V4(ipv4) => addrman::Record::new(
@@ -278,7 +280,7 @@ fn run(
     let stale_block_kill = Arc::clone(&kill);
 
     let peer_processing_handler = thread::spawn(move || {
-        info!("Starting net processing thread.");
+        info!(target: Category::NODE, "Starting net processing thread.");
         while running_peer.load(Ordering::SeqCst) {
             let addr_lock = peer_source.lock().unwrap();
             let (address, port) = addr_lock.select().unwrap().network_addr();
@@ -301,7 +303,7 @@ fn run(
                     connection
                 }
                 Err(e) => {
-                    error!("Could not connect: {e}");
+                    error!(target: Category::NET, "Could not connect: {e}");
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 }
@@ -311,20 +313,20 @@ fn run(
                     match e {
                         p2p::net::Error::Io(io) => {
                             if io.kind() != std::io::ErrorKind::UnexpectedEof {
-                                error!("Unexpected I/O error: {}", io);
+                                error!(target: Category::NET, "Unexpected I/O error: {}", io);
                             }
                         }
-                        e => error!("Error processing message: {e}"),
+                        e => error!(target: Category::NET, "Error processing message: {e}"),
                     }
                     break;
                 }
             }
         }
-        info!("Stopping net processing thread.");
+        info!(target: Category::NODE, "Stopping net processing thread.");
     });
 
     let addr_processing_handler = thread::spawn(move || {
-        info!("Starting addr processing thread.");
+        info!(target: Category::NODE, "Starting addr processing thread.");
         while running_addr.load(Ordering::SeqCst) {
             match addr_rx.recv() {
                 Ok(payload) => {
@@ -342,23 +344,23 @@ fn run(
                 Err(_) => break,
             }
         }
-        info!("Stopping addr processing thread.");
+        info!(target: Category::NODE, "Stopping addr processing thread.");
     });
 
     let block_processing_handler = thread::spawn(move || {
-        info!("Starting block processing thread.");
+        info!(target: Category::NODE, "Starting block processing thread.");
         let mut last_block = Instant::now();
         while running_block.load(Ordering::SeqCst) {
             match block_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(block) => {
-                    debug!("Validating block.");
+                    debug!(target: Category::KERNEL, "Validating block.");
                     last_block = Instant::now();
                     let _ = chainman.process_block(&block);
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if last_block.elapsed() > STALE_BLOCK_DURATION {
                         last_block = Instant::now();
-                        info!("Potential stale block. Finding a new peer.");
+                        info!(target: Category::NET, "Potential stale block. Finding a new peer.");
                         let mut peer_lock = stale_block_kill.lock().unwrap();
                         if let Some(conn) = peer_lock.deref_mut() {
                             let _ = conn.shutdown();
@@ -369,7 +371,7 @@ fn run(
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        info!("Stopping block processing thread.");
+        info!(target: Category::NODE, "Stopping block processing thread.");
     });
 
     if let Ok(()) = shutdown_rx.recv() {
@@ -378,7 +380,7 @@ fn run(
         if let Some(conn) = peer_lock.deref_mut() {
             conn.shutdown().unwrap()
         }
-        info!("Received shutdown signal, shutting down...");
+        info!(target: Category::NODE, "Received shutdown signal, shutting down...");
         running.store(false, Ordering::SeqCst);
     }
 
@@ -386,7 +388,7 @@ fn run(
     peer_processing_handler.join().unwrap();
     block_processing_handler.join().unwrap();
 
-    info!("exiting.");
+    info!(target: Category::NODE, "Exiting.");
     Ok(())
 }
 
@@ -397,7 +399,7 @@ fn main() {
     });
     if config.daemon {
         let daemonize = Daemonize::new(config.datadir.data_dir());
-        info!("Kernel node starting...");
+        info!(target: Category::NODE, "Kernel node starting...");
         daemonize.fork().unwrap();
     }
 
@@ -445,7 +447,7 @@ fn main() {
     };
 
     if let Err(err) = node_state.chainman.import_blocks() {
-        error!("Error importing blocks: {}", err);
+        error!(target: Category::KERNEL, "Error importing blocks: {}", err);
         return;
     }
 
@@ -453,14 +455,14 @@ fn main() {
     let hash = tip_index.block_hash();
     node_state.set_tip_state(BlockHash::from_byte_array(hash.to_bytes()));
 
-    info!("Bitcoin kernel initialized");
+    info!(target: Category::KERNEL, "Bitcoin kernel initialized");
 
     let connect = config
         .connect
         .map(|sock| sock.parse::<SocketAddr>().unwrap());
 
     if shutdown_rx.try_recv().is_ok() {
-        info!("Shutting down!");
+        info!(target: Category::NODE, "Shutting down!");
         return;
     }
 
@@ -475,7 +477,7 @@ fn main() {
                 .run_until(async move {
                     let sock_file = data_dir + "/node.sock";
                     let _ = std::fs::remove_file(&sock_file);
-                    info!("Listening for incoming IPC requests");
+                    debug!(target: Category::IPC, "Listening for incoming IPC requests");
                     let unix_socket = UnixListener::bind(sock_file).unwrap();
                     loop {
                         let stream = tokio::select! {
@@ -483,12 +485,12 @@ fn main() {
                                 unix_bind_res.unwrap().0
                             }
                             _ctrl_c = tokio::signal::ctrl_c() => {
-                                info!("Received shutdown signal");
+                                info!(target: Category::NODE, "Received shutdown signal");
                                 shutdown_tx.clone().send(()).unwrap();
                                 return;
                             }
                         };
-                        info!("Handling inbound IPC call");
+                        debug!(target: Category::IPC, "Handling inbound IPC call");
                         let state = Arc::clone(&wallet_for_ipc);
                         let (reader, writer) = stream.into_split();
                         let buf_reader = futures::io::BufReader::new(reader.compat());
