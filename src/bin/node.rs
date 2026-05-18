@@ -44,32 +44,37 @@ const STALE_BLOCK_DURATION: Duration = Duration::from_secs(60 * 20);
 
 configure_me::include_config!();
 
-fn scan_kernel_block(
-    chainman: &ChainstateManager,
-    kernel_block: &bitcoinkernel::Block,
-    entry: &bitcoinkernel::BlockTreeEntry,
-    wallet: &Arc<Mutex<Wallet>>,
-) {
-    let block_height = entry.height() as u32;
+enum ScanEvent {
+    Connected {
+        block_height: u32,
+        block: bitcoinkernel::Block,
+        spent_outputs: bitcoinkernel::BlockSpentOutputs,
+    },
+    Disconnected {
+        block: bitcoinkernel::Block,
+        block_height: u32,
+    },
+}
 
-    let spent_outputs = match chainman.read_spent_outputs(entry) {
-        Ok(u) => u,
-        Err(e) => {
-            warn!(target: Category::WALLET, "Reading spent outputs failed at height {block_height}: {e}");
-            return;
+#[derive(Clone)]
+struct FatalShutdown {
+    triggered: Arc<AtomicBool>,
+    tx: mpsc::Sender<()>,
+}
+
+impl FatalShutdown {
+    fn new(tx: mpsc::Sender<()>) -> Self {
+        Self {
+            triggered: Arc::new(AtomicBool::new(false)),
+            tx,
         }
-    };
+    }
 
-    let count = wallet
-        .lock()
-        .unwrap()
-        .scan_block(kernel_block, &spent_outputs, block_height);
-    if count > 0 {
-        info!(
-            target: Category::WALLET,
-            "Found {} silent payment(s) at height {}",
-            count, block_height
-        );
+    fn trigger(&self, target: &str, message: impl std::fmt::Display) {
+        error!(target: target, "{}", message);
+        if !self.triggered.swap(true, Ordering::SeqCst) {
+            self.tx.send(()).expect("failed to send shutdown signal");
+        }
     }
 }
 
@@ -79,12 +84,14 @@ fn create_context(
     tip_state: &Arc<Mutex<TipState>>,
     wallet: Arc<Mutex<Wallet>>,
     chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>>,
+    scan_tx: mpsc::Sender<ScanEvent>,
 ) -> Arc<Context> {
-    let shutdown_triggered = Arc::new(AtomicBool::new(false));
-    let shutdown_triggered_clone = Arc::clone(&shutdown_triggered);
-    let shutdown_tx_clone = shutdown_tx.clone();
+    let fatal = FatalShutdown::new(shutdown_tx);
     let tip_state_clone = tip_state.clone();
-    let wallet_for_disconnect = Arc::clone(&wallet);
+    let scan_tx_disconnect = scan_tx.clone();
+    let fatal_connected = fatal.clone();
+    let fatal_disconnected = fatal.clone();
+    let fatal_flush = fatal.clone();
     Arc::new(ContextBuilder::new()
         .chain_type(chain_type)
         .with_block_connected_validation(move |block: bitcoinkernel::Block, entry: bitcoinkernel::BlockTreeEntry<'_>| {
@@ -92,18 +99,28 @@ fn create_context(
                 return;
             }
             let Some(chainman) = chainman_holder.get() else { return };
-            scan_kernel_block(chainman.as_ref(), &block, &entry, &wallet);
+            match chainman.read_spent_outputs(&entry) {
+                Ok(spent_outputs) => {
+                    if scan_tx.send(ScanEvent::Connected {
+                        block_height: entry.height() as u32,
+                        block,
+                        spent_outputs,
+                    }).is_err() {
+                        fatal_connected.trigger(Category::NODE, "Scan channel closed unexpectedly during block connection");
+                    }
+                }
+                Err(message) => {
+                    fatal_connected.trigger(Category::KERNEL, format!("Fatal error reading block spent outputs: {}", message));
+                }
+            }
         })
         .with_block_disconnected_validation(move |block: bitcoinkernel::Block, entry: bitcoinkernel::BlockTreeEntry<'_>| {
-            if wallet_for_disconnect.lock().unwrap().keys.is_none() {
-                return;
+            if scan_tx_disconnect.send(ScanEvent::Disconnected {
+                block,
+                block_height: entry.height() as u32,
+            }).is_err() {
+                fatal_disconnected.trigger(Category::NODE, "Scan channel closed unexpectedly during block disconnection");
             }
-            let height = entry.height();
-            wallet_for_disconnect
-                .lock()
-                .unwrap()
-                .process_disconnect(&block);
-            info!(target: Category::WALLET, "Disconnected block at height {}", height);
         })
         .with_block_tip_notification(|state, hash: bitcoinkernel::BlockHash, _| {
                 let hash = BlockHash::from_byte_array(hash.into());
@@ -126,16 +143,10 @@ fn create_context(
         .with_warning_set_notification(|_warning, _message| {})
         .with_warning_unset_notification(|_warning| {})
         .with_flush_error_notification(move |message| {
-                if !shutdown_triggered.swap(true, Ordering::SeqCst) {
-                    shutdown_tx.send(()).expect("failed to send shutdown signal");
-                }
-                error!(target: Category::KERNEL, "Fatal flush error encountered: {}", message);
+                fatal_flush.trigger(Category::KERNEL, format!("Fatal flush error encountered: {}", message));
         })
         .with_fatal_error_notification(move |message| {
-                error!(target: Category::KERNEL, "Fatal error encountered: {}", message);
-                if !shutdown_triggered_clone.swap(true, Ordering::SeqCst) {
-                    shutdown_tx_clone.send(()).expect("failed to send shutdown signal");
-                }
+                fatal.trigger(Category::KERNEL, format!("Fatal error encountered: {}", message));
         })
         // .with_block_checked_validation(setup_validation_interface(tip_state))
         .with_block_checked_validation(move |block: bitcoinkernel::Block, state: bitcoinkernel::BlockValidationStateRef<'_>| {
@@ -215,6 +226,7 @@ fn resolve_seeds(network: Network) -> Vec<IpAddr> {
     results
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     network: Network,
     connect: Option<SocketAddr>,
@@ -222,6 +234,8 @@ fn run(
     shutdown_rx: mpsc::Receiver<()>,
     addr_rx: mpsc::Receiver<Vec<AddrV2Message>>,
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
+    scan_rx: mpsc::Receiver<ScanEvent>,
+    wallet: Arc<Mutex<Wallet>>,
 ) -> std::io::Result<()> {
     let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
     match connect {
@@ -273,6 +287,7 @@ fn run(
     let running_addr = running.clone();
     let running_peer = running.clone();
     let running_block = running.clone();
+    let running_scan = running.clone();
 
     let peer_source = Arc::clone(&addrman);
     let kill = Arc::new(Mutex::new(None));
@@ -374,6 +389,42 @@ fn run(
         info!(target: Category::NODE, "Stopping block processing thread.");
     });
 
+    let scan_processing_handler = thread::spawn(move || {
+        info!(target: Category::NODE, "Starting scan thread.");
+        while running_scan.load(Ordering::SeqCst) {
+            match scan_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(ScanEvent::Connected {
+                    block_height,
+                    block,
+                    spent_outputs,
+                }) => {
+                    let count =
+                        wallet
+                            .lock()
+                            .unwrap()
+                            .scan_block(block, spent_outputs, block_height);
+                    if count > 0 {
+                        info!(
+                            target: Category::WALLET,
+                            "Found {} silent payment(s) at height {}",
+                            count, block_height
+                        );
+                    }
+                }
+                Ok(ScanEvent::Disconnected {
+                    block,
+                    block_height,
+                }) => {
+                    wallet.lock().unwrap().process_disconnect(block);
+                    info!(target: Category::WALLET, "Disconnected block at height {}", block_height);
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        info!(target: Category::NODE, "Stopping scan thread.");
+    });
+
     if let Ok(()) = shutdown_rx.recv() {
         context.interrupt().unwrap();
         let mut peer_lock = kill.lock().unwrap();
@@ -387,6 +438,7 @@ fn run(
     addr_processing_handler.join().unwrap();
     peer_processing_handler.join().unwrap();
     block_processing_handler.join().unwrap();
+    scan_processing_handler.join().unwrap();
 
     info!(target: Category::NODE, "Exiting.");
     Ok(())
@@ -412,12 +464,16 @@ fn main() {
     let wallet = Arc::new(Mutex::new(Wallet::new(network.wallet_network())));
     let chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>> =
         Arc::new(std::sync::OnceLock::new());
+
+    let (scan_tx, scan_rx) = mpsc::channel::<ScanEvent>();
+
     let context = create_context(
         network.chain_type(),
         shutdown_tx.clone(),
         &tip_state,
         Arc::clone(&wallet),
         Arc::clone(&chainman_holder),
+        scan_tx,
     );
 
     let data_dir = config.datadir.data_dir();
@@ -512,5 +568,15 @@ fn main() {
         })
     });
 
-    run(network, connect, node_state, shutdown_rx, addr_rx, block_rx).unwrap()
+    run(
+        network,
+        connect,
+        node_state,
+        shutdown_rx,
+        addr_rx,
+        block_rx,
+        scan_rx,
+        wallet,
+    )
+    .unwrap();
 }
