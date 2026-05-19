@@ -89,7 +89,7 @@ pub(crate) fn scan_block_inner(
     receiver: &Receiver,
     b_scan: &SecretKey,
     kernel_block: &bitcoinkernel::Block,
-    spent_outputs: &bitcoinkernel::BlockSpentOutputs,
+    spent_outputs: bitcoinkernel::BlockSpentOutputs,
     block_height: u32,
 ) -> Vec<(OutPoint, Coin)> {
     let mut found: Vec<(OutPoint, Coin)> = Vec::new();

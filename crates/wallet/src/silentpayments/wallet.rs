@@ -98,8 +98,8 @@ impl Wallet {
 
     pub fn scan_block(
         &mut self,
-        kernel_block: &bitcoinkernel::Block,
-        spent_outputs: &bitcoinkernel::BlockSpentOutputs,
+        kernel_block: bitcoinkernel::Block,
+        spent_outputs: bitcoinkernel::BlockSpentOutputs,
         block_height: u32,
     ) -> usize {
         let Some(keys) = self.keys.as_ref() else {
@@ -111,7 +111,7 @@ impl Wallet {
         let found = scan_block_inner(
             &receiver,
             &scan_key,
-            kernel_block,
+            &kernel_block,
             spent_outputs,
             block_height,
         );
@@ -142,7 +142,7 @@ impl Wallet {
         count
     }
 
-    pub fn process_disconnect(&mut self, kernel_block: &bitcoinkernel::Block) {
+    pub fn process_disconnect(&mut self, kernel_block: bitcoinkernel::Block) {
         let block_txids: HashSet<Txid> = kernel_block
             .transactions()
             .map(|tx| Txid::from_byte_array(tx.txid().to_bytes()))
