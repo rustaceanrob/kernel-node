@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1, SecretKey, XOnlyPublicKey};
 use clap::Parser;
@@ -5,6 +7,8 @@ use kernel_node::ext::DirnameExt;
 use kernel_node::server_capnp::server;
 use tokio::net::UnixStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use wallet::io::FileExt;
+use wallet::silentpayments::{SilentPaymentKeysFile, SpendKey};
 
 const DEFAULT_DATA_DIR: &str = "~/.kernel-node/";
 
@@ -45,10 +49,16 @@ struct Echo {
 enum WalletCmd {
     /// Generate fresh scan and spend keys for receiving silent payments.
     ///
-    /// Prints the scan private key, spend private key, and spend x-only public
-    /// key as hex on stdout. WARNING: scan_key and spend_priv must be kept secret
-    /// — anyone with them can spend received funds.
-    GenerateKeys,
+    /// By default, prints the scan key, spend private key, and spend
+    /// x-only public key as hex on stdout. With `--out <path>`, writes
+    /// the secrets to a binary file and prints only the spend public
+    /// key on stderr. WARNING: anyone with the scan key and spend
+    /// private key can spend received funds.
+    GenerateKeys {
+        /// Write the keys to this binary file. Must not already exist.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Import BIP-352 silent payment keys to enable scanning for incoming payments.
     ///
     /// Both keys are hex-encoded. The scan key derives the ECDH shared secret with
@@ -98,12 +108,22 @@ async fn connect_server(datadir_path: &str) -> server::Client {
 fn main() {
     let cli = Args::parse();
 
-    if let Commands::Wallet(WalletCmd::GenerateKeys) = &cli.commands {
+    if let Commands::Wallet(WalletCmd::GenerateKeys { out }) = &cli.commands {
         let (scan_priv, spend_priv, spend_pub) = generate_keys();
-        eprintln!("WARNING: scan_key and spend_priv must be kept secret — anyone with them can spend received funds.");
-        println!("scan_key={}", scan_priv.display_secret());
-        println!("spend_priv={}", spend_priv.display_secret());
-        println!("spend_pub={}", spend_pub);
+        match out {
+            Some(path) => {
+                let file = SilentPaymentKeysFile::new(scan_priv, SpendKey::Secret(spend_priv));
+                file.save(path).expect("failed to write keys file");
+                eprintln!("Wrote silent payment keys to {}", path.display());
+                eprintln!("spend_pub={}", spend_pub);
+            }
+            None => {
+                eprintln!("WARNING: scan_key and spend_priv must be kept secret — anyone with them can spend received funds.");
+                println!("scan_key={}", scan_priv.display_secret());
+                println!("spend_priv={}", spend_priv.display_secret());
+                println!("spend_pub={}", spend_pub);
+            }
+        }
         return;
     }
 
@@ -139,7 +159,7 @@ fn main() {
                 let wallet_response = client.make_wallet_request().send().promise.await.unwrap();
                 let client = wallet_response.get().unwrap().get_wallet().unwrap();
                 match cmd {
-                    WalletCmd::GenerateKeys => unreachable!("handled before runtime"),
+                    WalletCmd::GenerateKeys { .. } => unreachable!("handled before runtime"),
                     WalletCmd::ImportKeys {
                         scan_key,
                         spend_key,
