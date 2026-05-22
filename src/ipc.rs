@@ -1,7 +1,7 @@
 use std::sync::{mpsc, Arc, Mutex};
 
-use bitcoin::secp256k1::{Parity, PublicKey, SecretKey, XOnlyPublicKey};
-use wallet::silentpayments::{build_receiver, SilentPaymentKeys, Wallet};
+use bitcoin::secp256k1::{SecretKey, XOnlyPublicKey};
+use wallet::silentpayments::Wallet;
 
 use crate::{server_capnp, wallet_capnp};
 
@@ -76,14 +76,11 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
             .map_err(|e| capnp::Error::failed(format!("invalid scan key: {e}")))?;
         let spend_xonly = XOnlyPublicKey::from_slice(spend_bytes)
             .map_err(|e| capnp::Error::failed(format!("invalid spend key: {e}")))?;
-        let spend_key = PublicKey::from_x_only_public_key(spend_xonly, Parity::Even);
 
         let mut wallet = self.state.lock().unwrap();
-        let receiver = build_receiver(&scan_key, spend_key, wallet.network)
+        wallet
+            .import_keys(scan_key, spend_xonly)
             .map_err(|e| capnp::Error::failed(format!("invalid key pair: {e}")))?;
-
-        wallet.spend_key = Some(spend_key);
-        wallet.keys = Some(SilentPaymentKeys { receiver, scan_key });
 
         results.get().set_ok(true);
         results.get().set_message("keys imported");

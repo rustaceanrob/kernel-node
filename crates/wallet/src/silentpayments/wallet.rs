@@ -3,12 +3,12 @@ use std::{
     fmt,
 };
 
-use bitcoin::secp256k1::{PublicKey, Scalar, SecretKey};
+use bitcoin::secp256k1::{Parity, PublicKey, Scalar, SecretKey, XOnlyPublicKey};
 use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptBuf, Txid};
 use bitcoinkernel::prelude::{TransactionExt, TxInExt, TxOutPointExt, TxidExt};
 
 use crate::silentpayments::scanning::scan_block_inner;
-use crate::silentpayments::{Label, Network, Receiver};
+use crate::silentpayments::{build_receiver, Label, Network, Receiver};
 
 #[derive(Debug)]
 pub struct SilentPaymentKeys {
@@ -94,6 +94,18 @@ impl Wallet {
             network,
             utxos: HashMap::new(),
         }
+    }
+
+    pub fn import_keys(
+        &mut self,
+        scan_key: SecretKey,
+        spend_xonly: XOnlyPublicKey,
+    ) -> Result<(), ::silentpayments::Error> {
+        let spend_pub = PublicKey::from_x_only_public_key(spend_xonly, Parity::Even);
+        let receiver = build_receiver(&scan_key, spend_pub, self.network)?;
+        self.spend_key = Some(spend_pub);
+        self.keys = Some(SilentPaymentKeys { receiver, scan_key });
+        Ok(())
     }
 
     pub fn scan_block(

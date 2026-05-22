@@ -32,7 +32,8 @@ use log::{debug, error, info, warn};
 use p2p::dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS};
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use wallet::silentpayments::Wallet;
+use wallet::io::FileExt;
+use wallet::silentpayments::{SilentPaymentKeysFile, Wallet};
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -444,6 +445,18 @@ fn run(
     Ok(())
 }
 
+fn auto_import_keys(wallet: &mut Wallet, path: &str) {
+    let file = SilentPaymentKeysFile::load(std::path::Path::new(path))
+        .unwrap_or_else(|e| panic!("Failed to load silent payment keys from {path}: {e}"));
+    wallet
+        .import_keys(file.scan_key, file.spend_xonly())
+        .unwrap_or_else(|e| panic!("Failed to build silent payment receiver from {path}: {e}"));
+    info!(
+        target: Category::NODE,
+        "Imported silent payment keys from {path}"
+    );
+}
+
 fn main() {
     let (config, _) = Config::including_optional_config_files::<&[&str]>(&[]).unwrap_or_exit();
     START.call_once(|| {
@@ -462,6 +475,9 @@ fn main() {
 
     let network = config.network.parse::<Network>().expect("invalid network");
     let wallet = Arc::new(Mutex::new(Wallet::new(network.wallet_network())));
+    if let Some(path) = config.sp_keys_file.as_ref() {
+        auto_import_keys(&mut wallet.lock().unwrap(), path);
+    }
     let chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>> =
         Arc::new(std::sync::OnceLock::new());
 
