@@ -1,8 +1,10 @@
+mod keys_file;
 mod scanning;
 mod wallet;
 
 pub use ::silentpayments::receiving::{Label, Receiver};
 pub use ::silentpayments::{Network, SilentPaymentAddress};
+pub use keys_file::{SilentPaymentKeysFile, SpendKey};
 pub use scanning::{scan_transaction, InputData};
 pub use wallet::{Coin, HistoryEntry, SilentPaymentKeys, SpentBy, Wallet};
 
