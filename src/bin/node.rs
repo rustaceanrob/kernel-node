@@ -26,10 +26,11 @@ use kernel_node::{
     ipc::IpcInterface,
     logging::Category,
     peer::{BitcoinPeer, NodeState, TipState},
+    resolve_seeds,
     server_capnp::server,
+    FatalShutdown, ScanEvent,
 };
 use log::{debug, error, info, warn};
-use p2p::dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS};
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
@@ -44,40 +45,6 @@ const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
 const STALE_BLOCK_DURATION: Duration = Duration::from_secs(60 * 20);
 
 configure_me::include_config!();
-
-enum ScanEvent {
-    Connected {
-        block_height: u32,
-        block: bitcoinkernel::Block,
-        spent_outputs: bitcoinkernel::BlockSpentOutputs,
-    },
-    Disconnected {
-        block: bitcoinkernel::Block,
-        block_height: u32,
-    },
-}
-
-#[derive(Clone)]
-struct FatalShutdown {
-    triggered: Arc<AtomicBool>,
-    tx: mpsc::Sender<()>,
-}
-
-impl FatalShutdown {
-    fn new(tx: mpsc::Sender<()>) -> Self {
-        Self {
-            triggered: Arc::new(AtomicBool::new(false)),
-            tx,
-        }
-    }
-
-    fn trigger(&self, target: &str, message: impl std::fmt::Display) {
-        error!(target: target, "{}", message);
-        if !self.triggered.swap(true, Ordering::SeqCst) {
-            self.tx.send(()).expect("failed to send shutdown signal");
-        }
-    }
-}
 
 fn create_context(
     chain_type: ChainType,
@@ -183,48 +150,6 @@ fn setup_logging() {
     builder.init();
 
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
-}
-
-// fn setup_validation_interface(
-//     tip_state: &Arc<Mutex<TipState>>,
-// ) -> Box<ValidationInterfaceCallbacks> {
-//     let tip_state_clone = Arc::clone(&tip_state);
-//     Box::new(ValidationInterfaceCallbacks {
-//         block_checked: Box::new(move |block, mode, _result| match mode {
-//             ValidationMode::Valid => {
-//                 let hash = bitcoin::BlockHash::from_byte_array(block.get_hash().hash);
-//                 log::debug!("Validation interface: Successfully checked block: {}", hash);
-//                 tip_state_clone.lock().unwrap().block_hash = hash;
-//             }
-//             _ => error!("Received an invalid block!"),
-//         }),
-//     })
-// }
-
-fn resolve_seeds(network: Network) -> Vec<IpAddr> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let format_hostname = |host: &str| format!("{host}:53");
-    let seeds: Vec<String> = match network {
-        Network::Bitcoin => BITCOIN_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Signet => SIGNET_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Testnet => TESTNET3_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Testnet4 => TESTNET4_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Regtest => Vec::new(),
-    };
-    let mut results = Vec::new();
-    for host in seeds {
-        let peers = rt.block_on(async move {
-            tokio::net::lookup_host(host)
-                .await
-                .map(|sockets| sockets.map(|socket| socket.ip()).collect())
-                .unwrap_or(Vec::new())
-        });
-        results.extend(peers);
-    }
-    results
 }
 
 #[allow(clippy::too_many_arguments)]
