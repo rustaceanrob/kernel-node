@@ -31,6 +31,10 @@ use kernel_node::{
     FatalShutdown, ScanEvent,
 };
 use log::{debug, error, info, warn};
+use p2p::{
+    handshake::ConnectionConfig,
+    net::{ConnectionExt, TimeoutParams},
+};
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
@@ -152,6 +156,32 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
+fn open_feeler(table: &mut addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>, network: Network) {
+    if let Some(record) = table.select() {
+        let (addr, port) = record.network_addr();
+        let socket_addr = match addr {
+            AddrV2::Ipv6(ipv6) => SocketAddr::new(IpAddr::V6(ipv6), port),
+            AddrV2::Ipv4(ipv4) => SocketAddr::new(IpAddr::V4(ipv4), port),
+            _ => return,
+        };
+        let conf = ConnectionConfig::new()
+            .change_network(network)
+            .set_service_requirement(ServiceFlags::NETWORK)
+            .offer_services(ServiceFlags::WITNESS)
+            .user_agent("/kernel-node:0.1.0/".into());
+        match conf.open_connection(socket_addr, TimeoutParams::new()) {
+            Ok(_) => {
+                info!(target: Category::NODE, "Successful feeler connection opened to {:?}", socket_addr);
+                table.successful_connection(&record);
+            }
+            Err(_) => {
+                info!(target: Category::NODE, "Failed feeler connection to {:?}", socket_addr);
+                table.failed_connection(&record);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     network: Network,
@@ -208,12 +238,14 @@ fn run(
     let chainman = Arc::clone(&node_state.chainman);
     let context = Arc::clone(&node_state.context);
     let addrman = Arc::new(Mutex::new(table));
+    let addrman_for_feelers = Arc::clone(&addrman);
 
     let running = Arc::new(AtomicBool::new(true));
     let running_addr = running.clone();
     let running_peer = running.clone();
     let running_block = running.clone();
     let running_scan = running.clone();
+    let running_feelers = running.clone();
 
     let peer_source = Arc::clone(&addrman);
     let kill = Arc::new(Mutex::new(None));
@@ -223,20 +255,19 @@ fn run(
     let peer_processing_handler = thread::spawn(move || {
         info!(target: Category::NODE, "Starting net processing thread.");
         while running_peer.load(Ordering::SeqCst) {
-            let addr_lock = peer_source.lock().unwrap();
-            let (address, port) = addr_lock.select().unwrap().network_addr();
-            let peer = match address {
-                AddrV2::Ipv4(ipv4) => BitcoinPeer::new(
-                    SocketAddr::V4(SocketAddrV4::new(ipv4, port)),
-                    network,
-                    &mut node_state,
-                ),
-                AddrV2::Ipv6(ipv6) => {
-                    let socket_adrr = (ipv6, port).into();
-                    BitcoinPeer::new(socket_adrr, network, &mut node_state)
+            let socket_addr = {
+                let addr_lock = peer_source.lock().unwrap();
+                let (address, port) = addr_lock.select().unwrap().network_addr();
+                match address {
+                    AddrV2::Ipv4(ipv4) => Some(SocketAddr::V4(SocketAddrV4::new(ipv4, port))),
+                    AddrV2::Ipv6(ipv6) => Some(SocketAddr::from((ipv6, port))),
+                    _ => None,
                 }
-                _ => continue,
             };
+            let Some(socket_addr) = socket_addr else {
+                continue;
+            };
+            let peer = BitcoinPeer::new(socket_addr, network, &mut node_state);
             let mut peer = match peer {
                 Ok(connection) => {
                     let mut writer_lock = writer.lock().unwrap();
@@ -351,6 +382,17 @@ fn run(
         info!(target: Category::NODE, "Stopping scan thread.");
     });
 
+    let feeler_thread = std::thread::spawn(move || {
+        info!(target: Category::NODE, "Starting feeler thread.");
+        while running_feelers.load(Ordering::SeqCst) {
+            {
+                let mut table = addrman_for_feelers.lock().unwrap();
+                open_feeler(table.deref_mut(), network);
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+
     if let Ok(()) = shutdown_rx.recv() {
         context.interrupt().unwrap();
         let mut peer_lock = kill.lock().unwrap();
@@ -365,6 +407,7 @@ fn run(
     peer_processing_handler.join().unwrap();
     block_processing_handler.join().unwrap();
     scan_processing_handler.join().unwrap();
+    feeler_thread.join().unwrap();
 
     info!(target: Category::NODE, "Exiting.");
     Ok(())
