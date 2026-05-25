@@ -75,6 +75,11 @@ enum WalletCmd {
     History,
     /// Show the silent payment address the wallet is scanning for.
     Receive,
+    /// Broadcast a raw transaction to the network.
+    BroadcastRawTx {
+        /// Hex-encoded raw transaction.
+        tx: String,
+    },
 }
 
 fn generate_keys() -> (SecretKey, SecretKey, XOnlyPublicKey) {
@@ -205,6 +210,15 @@ fn main() {
                         let r = result.get().unwrap();
                         let address = r.get_address().unwrap().to_string().unwrap();
                         println!("{}", address);
+                    }
+                    WalletCmd::BroadcastRawTx { tx } => {
+                        let raw_bytes = Vec::<u8>::from_hex(&tx).expect("tx must be valid hex");
+                        let mut req = client.broadcast_raw_tx_request();
+                        req.get().set_tx(&raw_bytes);
+                        let result = req.send().promise.await.unwrap();
+                        let r = result.get().unwrap();
+                        let txid = r.get_txid().unwrap().to_string().unwrap();
+                        println!("{}", txid);
                     }
                 }
             }
