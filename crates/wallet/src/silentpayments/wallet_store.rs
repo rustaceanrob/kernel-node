@@ -101,6 +101,7 @@ impl From<io::Error> for WalletStoreError {
 
 // ─── store ────────────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 /// Durable backing store for wallet state using fixed-size coin records.
 ///
 /// The store keeps the file open and maintains an in-memory index mapping each

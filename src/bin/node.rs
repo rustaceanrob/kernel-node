@@ -38,8 +38,11 @@ use p2p::{
 };
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use std::path::{Path, PathBuf};
+
 use wallet::io::FileExt;
-use wallet::silentpayments::{SilentPaymentKeysFile, Wallet};
+use wallet::silentpayments::{SilentPaymentKeysFile, Wallet, WalletStore};
+use kernel_node::WalletState;
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -57,7 +60,7 @@ fn create_context(
     chain_type: ChainType,
     shutdown_tx: mpsc::Sender<()>,
     tip_state: &Arc<Mutex<TipState>>,
-    wallet: Arc<Mutex<Wallet>>,
+    wallet: Arc<Mutex<WalletState>>,
     chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>>,
     scan_tx: mpsc::Sender<ScanEvent>,
 ) -> Arc<Context> {
@@ -70,7 +73,7 @@ fn create_context(
     Arc::new(ContextBuilder::new()
         .chain_type(chain_type)
         .with_block_connected_validation(move |block: bitcoinkernel::Block, entry: bitcoinkernel::BlockTreeEntry<'_>| {
-            if wallet.lock().unwrap().keys.is_none() {
+            if wallet.lock().unwrap().wallet.keys.is_none() {
                 return;
             }
             let Some(chainman) = chainman_holder.get() else { return };
@@ -238,7 +241,7 @@ fn run(
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
     scan_rx: mpsc::Receiver<ScanEvent>,
     broadcast_rx: mpsc::Receiver<Transaction>,
-    wallet: Arc<Mutex<Wallet>>,
+    wallet: Arc<Mutex<WalletState>>,
 ) -> std::io::Result<()> {
     let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
     match connect {
@@ -402,16 +405,24 @@ fn run(
                     block,
                     spent_outputs,
                 }) => {
-                    let result =
-                        wallet
-                            .lock()
-                            .unwrap()
-                            .scan_block(block, spent_outputs, block_height);
-                    if result.found > 0 {
+                    let mut state = wallet.lock().unwrap();
+                    let result = state.wallet.scan_block(block, spent_outputs, block_height);
+                    if let Some(store) = &mut state.store {
+                        if let Err(e) = store.apply_scan(
+                            block_height,
+                            &result.new_coins,
+                            &result.newly_spent,
+                        ) {
+                            warn!(target: Category::WALLET, "Wallet store write failed: {e}");
+                        }
+                    }
+                    let found = result.found;
+                    drop(state);
+                    if found > 0 {
                         info!(
                             target: Category::WALLET,
                             "Found {} silent payment(s) at height {}",
-                            result.found, block_height
+                            found, block_height
                         );
                     }
                 }
@@ -419,7 +430,18 @@ fn run(
                     block,
                     block_height,
                 }) => {
-                    wallet.lock().unwrap().process_disconnect(block);
+                    let mut state = wallet.lock().unwrap();
+                    let result = state.wallet.process_disconnect(block);
+                    if let Some(store) = &mut state.store {
+                        if let Err(e) = store.apply_disconnect(
+                            block_height.saturating_sub(1),
+                            &result.removed,
+                            &result.unspent,
+                        ) {
+                            warn!(target: Category::WALLET, "Wallet store write failed: {e}");
+                        }
+                    }
+                    drop(state);
                     info!(target: Category::WALLET, "Disconnected block at height {}", block_height);
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
@@ -466,16 +488,53 @@ fn run(
     Ok(())
 }
 
-fn auto_import_keys(wallet: &mut Wallet, path: &str) {
-    let file = SilentPaymentKeysFile::load(std::path::Path::new(path))
+/// Loads keys from `path`, imports them into the wallet, and opens or creates
+/// the wallet store so that scanning results are persisted immediately.
+fn auto_import_keys(state: &mut WalletState, path: &str) {
+    let file = SilentPaymentKeysFile::load(Path::new(path))
         .unwrap_or_else(|e| panic!("Failed to load silent payment keys from {path}: {e}"));
-    wallet
+    state
+        .wallet
         .import_keys(file.scan_key, file.spend_xonly())
         .unwrap_or_else(|e| panic!("Failed to build silent payment receiver from {path}: {e}"));
-    info!(
-        target: Category::NODE,
-        "Imported silent payment keys from {path}"
-    );
+    state.ensure_store();
+    info!(target: Category::NODE, "Imported silent payment keys from {path}");
+}
+
+/// Initialises wallet state. If a store file already exists at `store_path`,
+/// opens it and restores all coins into the in-memory wallet so scanning can
+/// resume from the persisted height.
+fn init_wallet_state(network: Network, store_path: PathBuf) -> WalletState {
+    let mut wallet = Wallet::new(network.wallet_network());
+    let store = if store_path.exists() {
+        match WalletStore::open(&store_path) {
+            Ok(mut s) => {
+                match s.coins() {
+                    Ok(coins) => {
+                        wallet.restore(s.scan_height, coins);
+                        info!(
+                            target: Category::WALLET,
+                            "Restored wallet from store: scan_height={}", s.scan_height
+                        );
+                    }
+                    Err(e) => {
+                        warn!(target: Category::WALLET, "Failed to load coins from wallet store: {e}");
+                    }
+                }
+                Some(s)
+            }
+            Err(e) => {
+                warn!(
+                    target: Category::WALLET,
+                    "Failed to open wallet store at {}: {e}", store_path.display()
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    WalletState::new(wallet, store, store_path)
 }
 
 fn main() {
@@ -483,8 +542,11 @@ fn main() {
     START.call_once(|| {
         setup_logging();
     });
+
+    let data_dir = config.datadir.data_dir();
+
     if config.daemon {
-        let daemonize = Daemonize::new(config.datadir.data_dir());
+        let daemonize = Daemonize::new(data_dir.clone());
         info!(target: Category::NODE, "Kernel node starting...");
         daemonize.fork().unwrap();
     }
@@ -495,10 +557,13 @@ fn main() {
     let tip_state = Arc::new(Mutex::new(TipState::default()));
 
     let network = config.network.parse::<Network>().expect("invalid network");
-    let wallet = Arc::new(Mutex::new(Wallet::new(network.wallet_network())));
+    let store_path = PathBuf::from(&data_dir).join("wallet.bin");
+    let mut wallet_state = init_wallet_state(network, store_path);
     if let Some(path) = config.sp_keys_file.as_ref() {
-        auto_import_keys(&mut wallet.lock().unwrap(), path);
+        auto_import_keys(&mut wallet_state, path);
     }
+    let wallet = Arc::new(Mutex::new(wallet_state));
+
     let chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>> =
         Arc::new(std::sync::OnceLock::new());
 
@@ -513,7 +578,6 @@ fn main() {
         scan_tx,
     );
 
-    let data_dir = config.datadir.data_dir();
     let blocks_dir = data_dir.clone() + "/blocks";
     let chainman_builder = ChainstateManagerBuilder::new(&context, &data_dir, &blocks_dir)
         .unwrap()
@@ -560,7 +624,7 @@ fn main() {
         return;
     }
 
-    let wallet_for_ipc = Arc::clone(&wallet);
+    let wallet_for_ipc: Arc<Mutex<WalletState>> = Arc::clone(&wallet);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

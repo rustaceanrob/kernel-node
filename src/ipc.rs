@@ -3,28 +3,23 @@ use std::sync::{mpsc, Arc, Mutex};
 use bitcoin::consensus::Decodable;
 use bitcoin::secp256k1::{SecretKey, XOnlyPublicKey};
 use bitcoin::Transaction;
-use wallet::silentpayments::Wallet;
 
-use crate::{server_capnp, wallet_capnp};
+use crate::{server_capnp, wallet_capnp, WalletState};
 
 #[derive(Debug)]
 pub struct IpcInterface {
     tx: mpsc::Sender<()>,
     broadcast_tx: mpsc::SyncSender<Transaction>,
-    state: Arc<Mutex<Wallet>>,
+    state: Arc<Mutex<WalletState>>,
 }
 
 impl IpcInterface {
     pub fn new(
         tx: mpsc::Sender<()>,
         broadcast_tx: mpsc::SyncSender<Transaction>,
-        state: Arc<Mutex<Wallet>>,
+        state: Arc<Mutex<WalletState>>,
     ) -> Self {
-        Self {
-            tx,
-            broadcast_tx,
-            state,
-        }
+        Self { tx, broadcast_tx, state }
     }
 }
 
@@ -66,16 +61,13 @@ impl server_capnp::server::Server for IpcInterface {
 }
 
 pub struct WalletIpcInterface {
-    state: Arc<Mutex<Wallet>>,
+    state: Arc<Mutex<WalletState>>,
     broadcast_tx: mpsc::SyncSender<Transaction>,
 }
 
 impl WalletIpcInterface {
-    pub fn new(state: Arc<Mutex<Wallet>>, broadcast_tx: mpsc::SyncSender<Transaction>) -> Self {
-        Self {
-            state,
-            broadcast_tx,
-        }
+    pub fn new(state: Arc<Mutex<WalletState>>, broadcast_tx: mpsc::SyncSender<Transaction>) -> Self {
+        Self { state, broadcast_tx }
     }
 }
 
@@ -94,10 +86,12 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
         let spend_xonly = XOnlyPublicKey::from_slice(spend_bytes)
             .map_err(|e| capnp::Error::failed(format!("invalid spend key: {e}")))?;
 
-        let mut wallet = self.state.lock().unwrap();
-        wallet
+        let mut state = self.state.lock().unwrap();
+        state
+            .wallet
             .import_keys(scan_key, spend_xonly)
             .map_err(|e| capnp::Error::failed(format!("invalid key pair: {e}")))?;
+        state.ensure_store();
 
         results.get().set_ok(true);
         results.get().set_message("keys imported");
@@ -109,11 +103,11 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
         _: wallet_capnp::wallet::GetBalanceParams,
         mut results: wallet_capnp::wallet::GetBalanceResults,
     ) -> Result<(), capnp::Error> {
-        let wallet = self.state.lock().unwrap();
-        let balance = wallet.balance();
-        let scan_height = wallet.scan_height;
-        let utxo_count = wallet.utxo_count() as u32;
-        drop(wallet);
+        let state = self.state.lock().unwrap();
+        let balance = state.wallet.balance();
+        let scan_height = state.wallet.scan_height;
+        let utxo_count = state.wallet.utxo_count() as u32;
+        drop(state);
 
         let mut r = results.get();
         r.set_sats(balance.to_sat());
@@ -127,9 +121,9 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
         _: wallet_capnp::wallet::GetHistoryParams,
         mut results: wallet_capnp::wallet::GetHistoryResults,
     ) -> Result<(), capnp::Error> {
-        let wallet = self.state.lock().unwrap();
-        let history = wallet.history();
-        drop(wallet);
+        let state = self.state.lock().unwrap();
+        let history = state.wallet.history();
+        drop(state);
 
         let text = history
             .iter()
@@ -146,11 +140,12 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
         _: wallet_capnp::wallet::ReceiveParams,
         mut results: wallet_capnp::wallet::ReceiveResults,
     ) -> Result<(), capnp::Error> {
-        let wallet = self.state.lock().unwrap();
-        let address = wallet
+        let state = self.state.lock().unwrap();
+        let address = state
+            .wallet
             .receive_address()
             .ok_or_else(|| capnp::Error::failed("no keys imported".to_string()))?;
-        drop(wallet);
+        drop(state);
 
         results.get().set_address(&address);
         Ok(())
