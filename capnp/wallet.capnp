@@ -5,4 +5,5 @@ interface Wallet {
     getBalance  @1 () -> (sats :UInt64, scanHeight :UInt32, utxoCount :UInt32);
     getHistory  @2 () -> (entries :Text);
     receive     @3 () -> (address :Text);
+    broadcastRawTx @4 (tx :Data) -> (txid :Text);
 }

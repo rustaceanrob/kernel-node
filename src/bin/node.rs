@@ -12,9 +12,10 @@ use std::{
 
 use bitcoin::p2p::{
     address::{AddrV2, AddrV2Message},
+    message::NetworkMessage,
     ServiceFlags,
 };
-use bitcoin::{hashes::Hash, BlockHash, Network};
+use bitcoin::{hashes::Hash, BlockHash, Network, Transaction};
 use bitcoinkernel::{
     core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManager,
     ChainstateManagerBuilder, Context, ContextBuilder, Log, Logger, SynchronizationState,
@@ -31,6 +32,10 @@ use kernel_node::{
     FatalShutdown, ScanEvent,
 };
 use log::{debug, error, info, warn};
+use p2p::{
+    handshake::ConnectionConfig,
+    net::{ConnectionExt, TimeoutParams},
+};
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
@@ -43,6 +48,8 @@ const MAX_BUCKETS: usize = 4;
 const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
 
 const STALE_BLOCK_DURATION: Duration = Duration::from_secs(60 * 20);
+
+const BROADCAST_TIMEOUT: Duration = Duration::from_secs(60);
 
 configure_me::include_config!();
 
@@ -152,6 +159,75 @@ fn setup_logging() {
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
 }
 
+fn open_feeler(table: &mut addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>, network: Network) {
+    if let Some(record) = table.select() {
+        let (addr, port) = record.network_addr();
+        let socket_addr = match addr {
+            AddrV2::Ipv6(ipv6) => SocketAddr::new(IpAddr::V6(ipv6), port),
+            AddrV2::Ipv4(ipv4) => SocketAddr::new(IpAddr::V4(ipv4), port),
+            _ => return,
+        };
+        let conf = ConnectionConfig::new()
+            .change_network(network)
+            .set_service_requirement(ServiceFlags::NETWORK)
+            .offer_services(ServiceFlags::WITNESS)
+            .user_agent("/kernel-node:0.1.0/".into());
+        match conf.open_connection(socket_addr, TimeoutParams::new()) {
+            Ok(_) => {
+                info!(target: Category::NODE, "Successful feeler connection opened to {:?}", socket_addr);
+                table.successful_connection(&record);
+            }
+            Err(_) => {
+                info!(target: Category::NODE, "Failed feeler connection to {:?}", socket_addr);
+                table.failed_connection(&record);
+            }
+        }
+    }
+}
+
+fn broadcast_transaction(
+    table: &mut addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>,
+    network: Network,
+    tx: &Transaction,
+) {
+    let start = Instant::now();
+    loop {
+        if start.elapsed() >= BROADCAST_TIMEOUT {
+            warn!(target: Category::NODE, "Timed out attempting to broadcast transaction");
+            return;
+        }
+        let Some(record) = table.select() else {
+            return;
+        };
+        let (addr, port) = record.network_addr();
+        let socket_addr = match addr {
+            AddrV2::Ipv6(ipv6) => SocketAddr::new(IpAddr::V6(ipv6), port),
+            AddrV2::Ipv4(ipv4) => SocketAddr::new(IpAddr::V4(ipv4), port),
+            _ => continue,
+        };
+        let conf = ConnectionConfig::new()
+            .change_network(network)
+            .offer_services(ServiceFlags::WITNESS)
+            .user_agent("/kernel-node:0.1.0/".into());
+        match conf.open_connection(socket_addr, TimeoutParams::new()) {
+            Ok((writer, _, _)) => match writer.send_message(NetworkMessage::Tx(tx.clone())) {
+                Ok(_) => {
+                    info!(target: Category::NODE, "Broadcast transaction to {:?}", socket_addr);
+                    table.successful_connection(&record);
+                    return;
+                }
+                Err(e) => {
+                    warn!(target: Category::NODE, "Failed to send transaction to {:?}: {}", socket_addr, e);
+                }
+            },
+            Err(_) => {
+                info!(target: Category::NODE, "Failed broadcast connection to {:?}", socket_addr);
+                table.failed_connection(&record);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     network: Network,
@@ -161,6 +237,7 @@ fn run(
     addr_rx: mpsc::Receiver<Vec<AddrV2Message>>,
     block_rx: mpsc::Receiver<bitcoinkernel::Block>,
     scan_rx: mpsc::Receiver<ScanEvent>,
+    broadcast_rx: mpsc::Receiver<Transaction>,
     wallet: Arc<Mutex<Wallet>>,
 ) -> std::io::Result<()> {
     let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
@@ -208,12 +285,14 @@ fn run(
     let chainman = Arc::clone(&node_state.chainman);
     let context = Arc::clone(&node_state.context);
     let addrman = Arc::new(Mutex::new(table));
+    let addrman_for_feelers = Arc::clone(&addrman);
 
     let running = Arc::new(AtomicBool::new(true));
     let running_addr = running.clone();
     let running_peer = running.clone();
     let running_block = running.clone();
     let running_scan = running.clone();
+    let running_feelers = running.clone();
 
     let peer_source = Arc::clone(&addrman);
     let kill = Arc::new(Mutex::new(None));
@@ -223,20 +302,19 @@ fn run(
     let peer_processing_handler = thread::spawn(move || {
         info!(target: Category::NODE, "Starting net processing thread.");
         while running_peer.load(Ordering::SeqCst) {
-            let addr_lock = peer_source.lock().unwrap();
-            let (address, port) = addr_lock.select().unwrap().network_addr();
-            let peer = match address {
-                AddrV2::Ipv4(ipv4) => BitcoinPeer::new(
-                    SocketAddr::V4(SocketAddrV4::new(ipv4, port)),
-                    network,
-                    &mut node_state,
-                ),
-                AddrV2::Ipv6(ipv6) => {
-                    let socket_adrr = (ipv6, port).into();
-                    BitcoinPeer::new(socket_adrr, network, &mut node_state)
+            let socket_addr = {
+                let addr_lock = peer_source.lock().unwrap();
+                let (address, port) = addr_lock.select().unwrap().network_addr();
+                match address {
+                    AddrV2::Ipv4(ipv4) => Some(SocketAddr::V4(SocketAddrV4::new(ipv4, port))),
+                    AddrV2::Ipv6(ipv6) => Some(SocketAddr::from((ipv6, port))),
+                    _ => None,
                 }
-                _ => continue,
             };
+            let Some(socket_addr) = socket_addr else {
+                continue;
+            };
+            let peer = BitcoinPeer::new(socket_addr, network, &mut node_state);
             let mut peer = match peer {
                 Ok(connection) => {
                     let mut writer_lock = writer.lock().unwrap();
@@ -351,6 +429,23 @@ fn run(
         info!(target: Category::NODE, "Stopping scan thread.");
     });
 
+    let feeler_thread = std::thread::spawn(move || {
+        info!(target: Category::NODE, "Starting feeler thread.");
+        while running_feelers.load(Ordering::SeqCst) {
+            match broadcast_rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(tx) => {
+                    let mut table = addrman_for_feelers.lock().unwrap();
+                    broadcast_transaction(table.deref_mut(), network, &tx);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    let mut table = addrman_for_feelers.lock().unwrap();
+                    open_feeler(table.deref_mut(), network);
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+
     if let Ok(()) = shutdown_rx.recv() {
         context.interrupt().unwrap();
         let mut peer_lock = kill.lock().unwrap();
@@ -365,6 +460,7 @@ fn run(
     peer_processing_handler.join().unwrap();
     block_processing_handler.join().unwrap();
     scan_processing_handler.join().unwrap();
+    feeler_thread.join().unwrap();
 
     info!(target: Category::NODE, "Exiting.");
     Ok(())
@@ -434,6 +530,7 @@ fn main() {
 
     let (block_tx, block_rx) = mpsc::sync_channel(1);
     let (addr_tx, addr_rx) = mpsc::channel();
+    let (broadcast_tx, broadcast_rx) = mpsc::sync_channel::<Transaction>(1);
 
     let node_state = NodeState {
         addr_tx,
@@ -498,8 +595,11 @@ fn main() {
                             capnp_rpc::rpc_twoparty_capnp::Side::Server,
                             Default::default(),
                         );
-                        let client: server::Client =
-                            capnp_rpc::new_client(IpcInterface::new(ipc_shutdown.clone(), state));
+                        let client: server::Client = capnp_rpc::new_client(IpcInterface::new(
+                            ipc_shutdown.clone(),
+                            broadcast_tx.clone(),
+                            state,
+                        ));
                         let rpc_system =
                             capnp_rpc::RpcSystem::new(Box::new(network), Some(client.client));
                         tokio::task::spawn_local(rpc_system);
@@ -517,6 +617,7 @@ fn main() {
         addr_rx,
         block_rx,
         scan_rx,
+        broadcast_rx,
         wallet,
     )
     .unwrap();

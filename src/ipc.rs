@@ -1,6 +1,8 @@
 use std::sync::{mpsc, Arc, Mutex};
 
+use bitcoin::consensus::Decodable;
 use bitcoin::secp256k1::{SecretKey, XOnlyPublicKey};
+use bitcoin::Transaction;
 use wallet::silentpayments::Wallet;
 
 use crate::{server_capnp, wallet_capnp};
@@ -8,12 +10,21 @@ use crate::{server_capnp, wallet_capnp};
 #[derive(Debug)]
 pub struct IpcInterface {
     tx: mpsc::Sender<()>,
+    broadcast_tx: mpsc::SyncSender<Transaction>,
     state: Arc<Mutex<Wallet>>,
 }
 
 impl IpcInterface {
-    pub fn new(tx: mpsc::Sender<()>, state: Arc<Mutex<Wallet>>) -> Self {
-        Self { tx, state }
+    pub fn new(
+        tx: mpsc::Sender<()>,
+        broadcast_tx: mpsc::SyncSender<Transaction>,
+        state: Arc<Mutex<Wallet>>,
+    ) -> Self {
+        Self {
+            tx,
+            broadcast_tx,
+            state,
+        }
     }
 }
 
@@ -45,8 +56,10 @@ impl server_capnp::server::Server for IpcInterface {
         _: server_capnp::server::MakeWalletParams,
         mut results: server_capnp::server::MakeWalletResults,
     ) -> Result<(), capnp::Error> {
-        let client: wallet_capnp::wallet::Client =
-            capnp_rpc::new_client(WalletIpcInterface::new(self.state.clone()));
+        let client: wallet_capnp::wallet::Client = capnp_rpc::new_client(WalletIpcInterface::new(
+            self.state.clone(),
+            self.broadcast_tx.clone(),
+        ));
         results.get().set_wallet(client);
         Ok(())
     }
@@ -54,11 +67,15 @@ impl server_capnp::server::Server for IpcInterface {
 
 pub struct WalletIpcInterface {
     state: Arc<Mutex<Wallet>>,
+    broadcast_tx: mpsc::SyncSender<Transaction>,
 }
 
 impl WalletIpcInterface {
-    pub fn new(state: Arc<Mutex<Wallet>>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<Mutex<Wallet>>, broadcast_tx: mpsc::SyncSender<Transaction>) -> Self {
+        Self {
+            state,
+            broadcast_tx,
+        }
     }
 }
 
@@ -136,6 +153,22 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
         drop(wallet);
 
         results.get().set_address(&address);
+        Ok(())
+    }
+
+    async fn broadcast_raw_tx(
+        self: capnp::capability::Rc<Self>,
+        params: wallet_capnp::wallet::BroadcastRawTxParams,
+        mut results: wallet_capnp::wallet::BroadcastRawTxResults,
+    ) -> Result<(), capnp::Error> {
+        let mut raw = params.get()?.get_tx()?;
+        let tx = Transaction::consensus_decode(&mut raw)
+            .map_err(|e| capnp::Error::failed(format!("invalid transaction: {e}")))?;
+        let txid = tx.compute_txid().to_string();
+        self.broadcast_tx
+            .try_send(tx)
+            .map_err(|e| capnp::Error::failed(format!("broadcast unavailable: {e}")))?;
+        results.get().set_txid(&txid);
         Ok(())
     }
 }
