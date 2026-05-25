@@ -402,16 +402,16 @@ fn run(
                     block,
                     spent_outputs,
                 }) => {
-                    let count =
+                    let result =
                         wallet
                             .lock()
                             .unwrap()
                             .scan_block(block, spent_outputs, block_height);
-                    if count > 0 {
+                    if result.found > 0 {
                         info!(
                             target: Category::WALLET,
                             "Found {} silent payment(s) at height {}",
-                            count, block_height
+                            result.found, block_height
                         );
                     }
                 }
