@@ -10,14 +10,14 @@ use bitcoin::{
     p2p::{
         address::AddrV2Message,
         message::NetworkMessage,
-        message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory},
+        message_blockdata::{GetHeadersMessage, Inventory},
         Address, ServiceFlags,
     },
 };
 use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{
-    core::BlockHashExt, prelude::BlockValidationStateExt, BlockTreeEntry, ChainstateManager,
-    Context, ProcessBlockHeaderResult, ValidationMode,
+    core::BlockHashExt, prelude::BlockValidationStateExt, BlockTreeEntry, BlockValidationResult,
+    ChainstateManager, Context, ProcessBlockHeaderResult, ValidationMode,
 };
 use log::{debug, info, warn};
 use p2p::{
@@ -32,6 +32,10 @@ use crate::{
 
 const PROTOCOL_VERSION: ProtocolVersion = 70015;
 const MAX_LOCATOR_HASHES: usize = 101;
+/// Maximum number of inventory items in a single `getdata` message
+/// (Bitcoin P2P protocol limit). Exceeding this is a protocol violation
+/// and peers will reset the connection.
+const MAX_INV_SZ: usize = 50_000;
 
 #[derive(Clone)]
 pub struct TipState {
@@ -66,17 +70,22 @@ impl NodeState {
     }
 }
 
-/// State Machine for setting up a connection and getting blocks from a peer
+/// State Machine for setting up a connection and getting blocks from a peer.
+///
+/// After the initial headers sync the peer enters `Synced` and relies on
+/// BIP-130 announcements: the remote pushes unsolicited `headers` for new
+/// tips because we advertised `sendheaders` during the handshake. Legacy
+/// `inv` announcements are still accepted as a fallback.
 ///
 /// ```text
 ///       [*]
 ///        │
-/// AwaitingHeaders
-///        ▼
-///   AwaitingInv
-///       ▲ |
-/// Block | | Inv
-///       | ▼
+/// AwaitingHeaders ◄──── (non-connecting headers)
+///        ▼                      ▲
+///     Synced ──────────────────┘
+///       ▲ │
+///  Block│ │ Headers / Inv
+///       │ ▼
 ///   AwaitingBlock
 ///       │ ▲
 ///       │ │
@@ -87,7 +96,7 @@ impl NodeState {
 pub enum PeerStateMachine {
     #[default]
     AwaitingHeaders,
-    AwaitingInv,
+    Synced,
     AwaitingBlock(AwaitingBlock),
 }
 
@@ -134,12 +143,41 @@ fn create_getheaders_message(locator_hashes: Vec<bitcoin::BlockHash>) -> Network
     })
 }
 
-fn create_getblocks_message(locator_hashes: Vec<bitcoin::BlockHash>) -> NetworkMessage {
-    NetworkMessage::GetBlocks(GetBlocksMessage {
-        version: PROTOCOL_VERSION,
-        locator_hashes,
-        stop_hash: bitcoin::BlockHash::all_zeros(),
-    })
+/// Returns the next batch of block hashes on the best-known header chain that
+/// the active chain has not yet caught up to, in ascending height order.
+/// Capped at [`MAX_INV_SZ`] so the resulting `getdata` does not exceed the
+/// Bitcoin P2P inventory limit. Empty when the active chain matches the best
+/// header tip.
+fn pending_block_hashes(node_state: &NodeState) -> Vec<bitcoin::BlockHash> {
+    let active_height = node_state.chainman.active_chain().height();
+    let Some(best) = node_state.chainman.best_entry() else {
+        return Vec::new();
+    };
+    if best.height() <= active_height {
+        return Vec::new();
+    }
+    let remaining = (best.height() - active_height) as usize;
+    let batch = remaining.min(MAX_INV_SZ);
+    // Highest height to include in this batch (oldest-first download).
+    let top_height = active_height + batch as i32;
+
+    let mut entry = best;
+    while entry.height() > top_height {
+        match entry.prev() {
+            Some(prev) => entry = prev,
+            None => return Vec::new(),
+        }
+    }
+    let mut hashes = Vec::with_capacity(batch);
+    while entry.height() > active_height {
+        hashes.push(BlockHash::from_byte_array(entry.block_hash().to_bytes()));
+        match entry.prev() {
+            Some(prev) => entry = prev,
+            None => break,
+        }
+    }
+    hashes.reverse();
+    hashes
 }
 
 fn create_getdata_message(block_hashes: &[bitcoin::BlockHash]) -> NetworkMessage {
@@ -190,10 +228,19 @@ pub fn process_message(
                 }
 
                 if msg_len != 2000 {
-                    let locators = build_block_locators(node_state.chainman.active_chain().tip());
+                    let pending = pending_block_hashes(node_state);
+                    if pending.is_empty() {
+                        debug!(target: Category::NET, "Headers sync complete; chain is caught up");
+                        return (PeerStateMachine::Synced, vec![]);
+                    }
+                    debug!(target: Category::NET, "Headers sync complete; requesting {} blocks", pending.len());
+                    let getdata = create_getdata_message(&pending);
                     return (
-                        PeerStateMachine::AwaitingInv,
-                        vec![create_getblocks_message(locators)],
+                        PeerStateMachine::AwaitingBlock(AwaitingBlock {
+                            peer_inventory: pending.into_iter().collect(),
+                            block_buffer: HashMap::new(),
+                        }),
+                        vec![getdata],
                     );
                 }
 
@@ -208,7 +255,10 @@ pub fn process_message(
                 (PeerStateMachine::AwaitingHeaders, vec![])
             }
         },
-        PeerStateMachine::AwaitingInv => match event {
+        PeerStateMachine::Synced => match event {
+            NetworkMessage::Headers(headers) => {
+                handle_announced_headers(headers, node_state)
+            }
             NetworkMessage::Inv(inventory) => {
                 debug!(target: Category::NET, "Received inventory with {} items", inventory.len());
                 let block_hashes: Vec<bitcoin::BlockHash> = inventory
@@ -220,7 +270,7 @@ pub fn process_message(
                     .collect();
 
                 if !block_hashes.is_empty() {
-                    debug!(target: Category::NET, "Requesting {} blocks", block_hashes.len());
+                    debug!(target: Category::NET, "Requesting {} blocks via inv fallback", block_hashes.len());
                     (
                         PeerStateMachine::AwaitingBlock(AwaitingBlock {
                             peer_inventory: block_hashes.iter().cloned().collect(),
@@ -229,12 +279,12 @@ pub fn process_message(
                         vec![create_getdata_message(&block_hashes)],
                     )
                 } else {
-                    (PeerStateMachine::AwaitingInv, vec![])
+                    (PeerStateMachine::Synced, vec![])
                 }
             }
             message => {
                 debug!(target: Category::NET, "Ignoring message: {:?}", message);
-                (PeerStateMachine::AwaitingInv, vec![])
+                (PeerStateMachine::Synced, vec![])
             }
         },
         PeerStateMachine::AwaitingBlock(mut block_state) => match event {
@@ -255,16 +305,24 @@ pub fn process_message(
                     }
                 }
 
-                // If all to be expected blocks were received, clear any
-                // remaining blocks in the buffer and request a fresh batch of
-                // blocks.
+                // All expected blocks received; either request the next IBD
+                // batch or return to the announcement-driven Synced state.
                 if block_state.peer_inventory.is_empty() {
                     block_state.block_buffer.clear();
-                    let locators = build_block_locators(node_state.chainman.active_chain().tip());
-                    (
-                        PeerStateMachine::AwaitingInv,
-                        vec![create_getblocks_message(locators)],
-                    )
+                    let pending = pending_block_hashes(node_state);
+                    if pending.is_empty() {
+                        (PeerStateMachine::Synced, vec![])
+                    } else {
+                        debug!(target: Category::NET, "Requesting next IBD batch of {} blocks", pending.len());
+                        let getdata = create_getdata_message(&pending);
+                        (
+                            PeerStateMachine::AwaitingBlock(AwaitingBlock {
+                                peer_inventory: pending.into_iter().collect(),
+                                block_buffer: HashMap::new(),
+                            }),
+                            vec![getdata],
+                        )
+                    }
                 } else {
                     (PeerStateMachine::AwaitingBlock(block_state), vec![])
                 }
@@ -275,6 +333,53 @@ pub fn process_message(
             }
         },
     }
+}
+
+/// Handle an unsolicited `headers` message per BIP-130.
+///
+/// If the announced headers don't connect to our header tree, fall back to a
+/// locator-based `getheaders` to fill the gap. Otherwise request the
+/// announced blocks directly with a single `getdata`.
+fn handle_announced_headers(
+    headers: Vec<bitcoin::block::Header>,
+    node_state: &mut NodeState,
+) -> (PeerStateMachine, Vec<NetworkMessage>) {
+    if headers.is_empty() {
+        return (PeerStateMachine::Synced, vec![]);
+    }
+    debug!(target: Category::NET, "BIP-130 announcement of {} header(s)", headers.len());
+    let mut announced_hashes = Vec::with_capacity(headers.len());
+    for header in headers.iter() {
+        let result = node_state.chainman.process_block_header(&header.convert());
+        match result {
+            ProcessBlockHeaderResult::Success(state)
+                if state.mode() == ValidationMode::Valid =>
+            {
+                announced_hashes.push(header.block_hash());
+            }
+            ProcessBlockHeaderResult::Failed(state)
+                if state.result() == BlockValidationResult::MissingPrev =>
+            {
+                debug!(target: Category::NET, "Announced headers do not connect; issuing getheaders");
+                let locators = build_block_locators(node_state.chainman.best_entry().unwrap());
+                return (
+                    PeerStateMachine::AwaitingHeaders,
+                    vec![create_getheaders_message(locators)],
+                );
+            }
+            _ => {
+                warn!(target: Category::KERNEL, "Rejected announced header {}", header.block_hash());
+                return (PeerStateMachine::Synced, vec![]);
+            }
+        }
+    }
+    (
+        PeerStateMachine::AwaitingBlock(AwaitingBlock {
+            peer_inventory: announced_hashes.iter().cloned().collect(),
+            block_buffer: HashMap::new(),
+        }),
+        vec![create_getdata_message(&announced_hashes)],
+    )
 }
 
 pub struct BitcoinPeer {
