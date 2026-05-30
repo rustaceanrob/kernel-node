@@ -8,7 +8,7 @@ use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptBuf, Txid};
 use bitcoinkernel::prelude::{TransactionExt, TxInExt, TxOutPointExt, TxidExt};
 
 use crate::silentpayments::scanning::scan_block_inner;
-use crate::silentpayments::{build_receiver, Label, Network, Receiver};
+use crate::silentpayments::{build_receiver, Network, Receiver};
 
 #[derive(Debug)]
 pub struct SilentPaymentKeys {
@@ -16,18 +16,18 @@ pub struct SilentPaymentKeys {
     pub scan_key: SecretKey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpentBy {
     pub txid: Txid,
     pub block_height: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coin {
     pub value: Amount,
     pub script_pubkey: ScriptBuf,
     pub tweak: Scalar,
-    pub label: Option<Label>,
+    pub label: Option<Scalar>,
     pub block_height: u32,
     pub spent_by: Option<SpentBy>,
 }
@@ -82,7 +82,7 @@ pub struct Wallet {
     pub keys: Option<SilentPaymentKeys>,
     pub spend_key: Option<PublicKey>,
     pub network: Network,
-    utxos: HashMap<OutPoint, Coin>,
+    pub(crate) utxos: HashMap<OutPoint, Coin>,
 }
 
 impl Wallet {
@@ -93,6 +93,20 @@ impl Wallet {
             spend_key: None,
             network,
             utxos: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn from_parts(
+        scan_height: u32,
+        network: Network,
+        utxos: HashMap<OutPoint, Coin>,
+    ) -> Self {
+        Self {
+            scan_height,
+            keys: None,
+            spend_key: None,
+            network,
+            utxos,
         }
     }
 
