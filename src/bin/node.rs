@@ -36,10 +36,11 @@ use p2p::{
     handshake::ConnectionConfig,
     net::{ConnectionExt, TimeoutParams},
 };
+use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
-use wallet::silentpayments::{SilentPaymentKeysFile, Wallet};
+use wallet::silentpayments::{SilentPaymentKeysFile, Wallet, WalletStore};
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -55,13 +56,12 @@ configure_me::include_config!();
 
 fn create_context(
     chain_type: ChainType,
-    shutdown_tx: mpsc::Sender<()>,
+    fatal: FatalShutdown,
     tip_state: &Arc<Mutex<TipState>>,
     wallet: Arc<Mutex<Wallet>>,
     chainman_holder: Arc<std::sync::OnceLock<Arc<ChainstateManager>>>,
     scan_tx: mpsc::Sender<ScanEvent>,
 ) -> Arc<Context> {
-    let fatal = FatalShutdown::new(shutdown_tx);
     let tip_state_clone = tip_state.clone();
     let scan_tx_disconnect = scan_tx.clone();
     let fatal_connected = fatal.clone();
@@ -239,6 +239,8 @@ fn run(
     scan_rx: mpsc::Receiver<ScanEvent>,
     broadcast_rx: mpsc::Receiver<Transaction>,
     wallet: Arc<Mutex<Wallet>>,
+    wallet_store: WalletStore,
+    fatal: FatalShutdown,
 ) -> std::io::Result<()> {
     let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
     match connect {
@@ -393,6 +395,7 @@ fn run(
         info!(target: Category::NODE, "Stopping block processing thread.");
     });
 
+    let fatal_scan = fatal.clone();
     let scan_processing_handler = thread::spawn(move || {
         info!(target: Category::NODE, "Starting scan thread.");
         while running_scan.load(Ordering::SeqCst) {
@@ -402,11 +405,15 @@ fn run(
                     block,
                     spent_outputs,
                 }) => {
-                    let count =
-                        wallet
-                            .lock()
-                            .unwrap()
-                            .scan_block(block, spent_outputs, block_height);
+                    let mut wallet = wallet.lock().unwrap();
+                    let count = wallet.scan_block(block, spent_outputs, block_height);
+                    if let Err(e) = wallet_store.save(&wallet) {
+                        fatal_scan.trigger(
+                            Category::WALLET,
+                            format!("Wallet save failed at height {block_height}: {e}"),
+                        );
+                    }
+                    drop(wallet);
                     if count > 0 {
                         info!(
                             target: Category::WALLET,
@@ -419,7 +426,15 @@ fn run(
                     block,
                     block_height,
                 }) => {
-                    wallet.lock().unwrap().process_disconnect(block);
+                    let mut wallet = wallet.lock().unwrap();
+                    wallet.process_disconnect(block);
+                    if let Err(e) = wallet_store.save(&wallet) {
+                        fatal_scan.trigger(
+                            Category::WALLET,
+                            format!("Wallet save failed at disconnect of {block_height}: {e}"),
+                        );
+                    }
+                    drop(wallet);
                     info!(target: Category::WALLET, "Disconnected block at height {}", block_height);
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
@@ -495,7 +510,34 @@ fn main() {
     let tip_state = Arc::new(Mutex::new(TipState::default()));
 
     let network = config.network.parse::<Network>().expect("invalid network");
-    let wallet = Arc::new(Mutex::new(Wallet::new(network.wallet_network())));
+    let wallet_store = WalletStore::new(
+        PathBuf::from(config.datadir.data_dir()).join("wallet.bin"),
+        network.wallet_network(),
+    );
+    let initial_wallet = if wallet_store.exists() {
+        match wallet_store.load() {
+            Ok(loaded) => {
+                info!(
+                    target: Category::WALLET,
+                    "Loaded wallet from {} (scan_height={})",
+                    wallet_store.path().display(),
+                    loaded.scan_height
+                );
+                loaded
+            }
+            Err(e) => {
+                error!(
+                    target: Category::WALLET,
+                    "Failed to load wallet at {}: {e}",
+                    wallet_store.path().display()
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        Wallet::new(wallet_store.network())
+    };
+    let wallet = Arc::new(Mutex::new(initial_wallet));
     if let Some(path) = config.sp_keys_file.as_ref() {
         auto_import_keys(&mut wallet.lock().unwrap(), path);
     }
@@ -504,9 +546,10 @@ fn main() {
 
     let (scan_tx, scan_rx) = mpsc::channel::<ScanEvent>();
 
+    let fatal = FatalShutdown::new(shutdown_tx.clone());
     let context = create_context(
         network.chain_type(),
-        shutdown_tx.clone(),
+        fatal.clone(),
         &tip_state,
         Arc::clone(&wallet),
         Arc::clone(&chainman_holder),
@@ -619,6 +662,8 @@ fn main() {
         scan_rx,
         broadcast_rx,
         wallet,
+        wallet_store,
+        fatal,
     )
     .unwrap();
 }
