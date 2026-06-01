@@ -13,7 +13,7 @@ this.
 
 ## Quick Start
 
-If you have the dependencies to build Bitcoin Core with IPC and a usual Rust program, you can build `kernel-node`. For build instructions, see the [build documntation](./doc/build.md).
+If you have the dependencies to build Bitcoin Core with IPC and a usual Rust program, you can build `kernel-node`. For build instructions, see the [build documentation](./doc/build.md).
 
 To run on e.g. signet:
 
@@ -32,6 +32,10 @@ Arguments:
         --connect    Connect only to this node (format: ip:port or hostname:port)
         --daemon     Run the server as a daemon
 ```
+
+## Bitcoin Core Compatibility
+
+`kernel-node` uses the same database implementation and consensus rules as Bitcoin Core. If you have an existing data directory, you may skip IBD and pass it as the `--datadir` argument on startup. Any updates to the chainstate will be compatible with Bitcoin Core.
 
 ## MSRV
 
