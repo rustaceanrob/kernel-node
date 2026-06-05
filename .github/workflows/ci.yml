@@ -27,3 +27,5 @@ jobs:
         run: |
           cargo install cargo-msrv@0.19.2
           cargo msrv verify
+      - name: Test
+        run: cargo test --workspace --all-features --lib
