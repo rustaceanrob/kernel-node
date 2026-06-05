@@ -27,3 +27,17 @@ jobs:
         run: |
           cargo install cargo-msrv@0.19.2
           cargo msrv verify
+      - name: Test
+        run: cargo test --workspace --all-features --lib
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install Bitcoin Kernel Dependencies
+        run: brew install cmake pkgconf libevent boost capnp
+      - name: Check
+        run: cargo check --all-features
+      - name: Test
+        run: cargo test --workspace --all-features --lib
