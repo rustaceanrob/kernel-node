@@ -71,11 +71,12 @@ impl NodeState {
 /// ```text
 ///       [*]
 ///        │
-/// AwaitingHeaders
-///        ▼
-///   AwaitingInv
+/// AwaitingHeaders ◄──┐
+///        │           │
+///        ▼           │ unconnecting headers
+///   AwaitingInv ─────┘
 ///       ▲ |
-/// Block | | Inv
+/// Block | | Inv / Headers
 ///       | ▼
 ///   AwaitingBlock
 ///       │ ▲
@@ -209,6 +210,38 @@ pub fn process_message(
             }
         },
         PeerStateMachine::AwaitingInv => match event {
+            NetworkMessage::Headers(headers) => {
+                let mut announced = Vec::with_capacity(headers.len());
+                for header in headers {
+                    let block_hash = header.block_hash();
+                    let valid = matches!(
+                        node_state.chainman.process_block_header(&header.convert()),
+                        ProcessBlockHeaderResult::Success(s) if s.mode() == ValidationMode::Valid
+                    );
+                    if !valid {
+                        warn!(target: Category::KERNEL, "Rejected announced header {}", block_hash);
+                        break;
+                    }
+                    announced.push(block_hash);
+                }
+
+                if announced.is_empty() {
+                    let locators = build_block_locators(node_state.chainman.best_entry().unwrap());
+                    return (
+                        PeerStateMachine::AwaitingHeaders,
+                        vec![create_getheaders_message(locators)],
+                    );
+                }
+
+                debug!(target: Category::NET, "Requesting {} announced blocks", announced.len());
+                (
+                    PeerStateMachine::AwaitingBlock(AwaitingBlock {
+                        peer_inventory: announced.iter().copied().collect(),
+                        block_buffer: HashMap::new(),
+                    }),
+                    vec![create_getdata_message(&announced)],
+                )
+            }
             NetworkMessage::Inv(inventory) => {
                 debug!(target: Category::NET, "Received inventory with {} items", inventory.len());
                 let block_hashes: Vec<bitcoin::BlockHash> = inventory
