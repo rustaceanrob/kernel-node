@@ -2,8 +2,8 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use bitcoin::consensus::Decodable;
 use bitcoin::secp256k1::{SecretKey, XOnlyPublicKey};
-use bitcoin::Transaction;
-use wallet::silentpayments::Wallet;
+use bitcoin::{Amount, FeeRate, Transaction};
+use wallet::silentpayments::{Recipient, Wallet};
 
 use crate::{server_capnp, wallet_capnp};
 
@@ -169,6 +169,50 @@ impl wallet_capnp::wallet::Server for WalletIpcInterface {
             .try_send(tx)
             .map_err(|e| capnp::Error::failed(format!("broadcast unavailable: {e}")))?;
         results.get().set_txid(&txid);
+        Ok(())
+    }
+
+    async fn send_to_address(
+        self: capnp::capability::Rc<Self>,
+        params: wallet_capnp::wallet::SendToAddressParams,
+        mut results: wallet_capnp::wallet::SendToAddressResults,
+    ) -> Result<(), capnp::Error> {
+        let p = params.get()?;
+        let address = p.get_address()?.to_string()?;
+        let amount = Amount::from_sat(p.get_amount_sat());
+        let fee_rate_sat_per_vb = p.get_fee_rate_sat_per_vb();
+        if !fee_rate_sat_per_vb.is_finite() || fee_rate_sat_per_vb < 0.0 {
+            return Err(capnp::Error::failed(
+                "fee rate must be a non-negative number".to_string(),
+            ));
+        }
+        // 250 sat/kwu equals 1 sat/vB, rounded up so the rate is never below what was asked
+        let fee_rate = FeeRate::from_sat_per_kwu((fee_rate_sat_per_vb * 250.0).ceil() as u64);
+        let mut wallet = self.state.lock().unwrap();
+        let build = Recipient::parse(&address, wallet.network)
+            .and_then(|recipient| wallet.build_transaction(recipient, amount, fee_rate));
+        let tx = match build {
+            Ok(tx) => tx,
+            Err(e) if e.is_user_error() => {
+                drop(wallet);
+                results.get().set_ok(false);
+                results.get().set_message(e.to_string());
+                return Ok(());
+            }
+            Err(e) => return Err(capnp::Error::failed(e.to_string())),
+        };
+        let outpoints: Vec<_> = tx.input.iter().map(|i| i.previous_output).collect();
+        let txid = tx.compute_txid().to_string();
+        self.broadcast_tx
+            .try_send(tx)
+            .map_err(|e| capnp::Error::failed(format!("broadcast unavailable: {e}")))?;
+        wallet.reserve_coins(outpoints);
+        drop(wallet);
+
+        results.get().set_ok(true);
+        results
+            .get()
+            .set_message(format!("Successfully broadcast transaction {txid}"));
         Ok(())
     }
 }
