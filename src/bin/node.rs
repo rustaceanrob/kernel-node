@@ -15,6 +15,7 @@ use bitcoin::p2p::{
     message::NetworkMessage,
     ServiceFlags,
 };
+use bitcoin::secp256k1::rand::random;
 use bitcoin::{hashes::Hash, BlockHash, Network, Transaction};
 use bitcoinkernel::{
     core::BlockHashExt, prelude::BlockValidationStateExt, ChainType, ChainstateManager,
@@ -34,7 +35,7 @@ use kernel_node::{
 use log::{debug, error, info, warn};
 use p2p::{
     handshake::ConnectionConfig,
-    net::{ConnectionExt, TimeoutParams},
+    net::{ConnectionExt, ConnectionReader, TimeoutParams},
 };
 use std::path::PathBuf;
 use tokio::net::UnixListener;
@@ -51,6 +52,8 @@ const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
 const STALE_BLOCK_DURATION: Duration = Duration::from_secs(60 * 20);
 
 const BROADCAST_TIMEOUT: Duration = Duration::from_secs(60);
+
+const BROADCAST_PONG_TIMEOUT: Duration = Duration::from_secs(5);
 
 configure_me::include_config!();
 
@@ -185,15 +188,34 @@ fn open_feeler(table: &mut addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>,
     }
 }
 
+fn wait_for_pong(reader: &mut ConnectionReader, nonce: u64) -> bool {
+    let deadline = Instant::now() + BROADCAST_PONG_TIMEOUT;
+    while Instant::now() < deadline {
+        match reader.read_message() {
+            Ok(Some(NetworkMessage::Pong(received))) if received == nonce => return true,
+            Ok(_) => continue,
+            Err(p2p::net::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 fn broadcast_transaction(
     table: &mut addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>,
     network: Network,
     tx: &Transaction,
 ) {
+    let txid = tx.compute_txid();
     let start = Instant::now();
     loop {
         if start.elapsed() >= BROADCAST_TIMEOUT {
-            warn!(target: Category::NODE, "Timed out attempting to broadcast transaction");
+            warn!(target: Category::NODE, "Timed out broadcasting transaction {}", txid);
             return;
         }
         let Some(record) = table.select() else {
@@ -209,17 +231,28 @@ fn broadcast_transaction(
             .change_network(network)
             .offer_services(ServiceFlags::WITNESS)
             .user_agent("/kernel-node:0.1.0/".into());
-        match conf.open_connection(socket_addr, TimeoutParams::new()) {
-            Ok((writer, _, _)) => match writer.send_message(NetworkMessage::Tx(tx.clone())) {
-                Ok(_) => {
-                    info!(target: Category::NODE, "Broadcast transaction to {:?}", socket_addr);
-                    table.successful_connection(&record);
-                    return;
+        let mut timeouts = TimeoutParams::new();
+        timeouts.read_timeout(Duration::from_secs(1));
+        match conf.open_connection(socket_addr, timeouts) {
+            Ok((writer, mut reader, _)) => {
+                match writer.send_message(NetworkMessage::Tx(tx.clone())) {
+                    Ok(_) => {
+                        let nonce: u64 = random();
+                        if let Err(e) = writer.send_message(NetworkMessage::Ping(nonce)) {
+                            warn!(target: Category::NODE, "Failed to ping {:?} after sending {}: {}", socket_addr, txid, e);
+                        } else if wait_for_pong(&mut reader, nonce) {
+                            info!(target: Category::NODE, "Broadcast transaction {} to {:?}", txid, socket_addr);
+                            table.successful_connection(&record);
+                            return;
+                        } else {
+                            warn!(target: Category::NODE, "No pong from {:?} confirming {}", socket_addr, txid);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(target: Category::NODE, "Failed to send transaction to {:?}: {}", socket_addr, e);
+                    }
                 }
-                Err(e) => {
-                    warn!(target: Category::NODE, "Failed to send transaction to {:?}: {}", socket_addr, e);
-                }
-            },
+            }
             Err(_) => {
                 info!(target: Category::NODE, "Failed broadcast connection to {:?}", socket_addr);
                 table.failed_connection(&record);
