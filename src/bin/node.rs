@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
-use wallet::silentpayments::{SilentPaymentKeysFile, Wallet, WalletStore};
+use wallet::silentpayments::{SilentPaymentKeysFile, SpendKey, Wallet, WalletStore};
 
 const TABLE_WIDTH: usize = 16;
 const TABLE_SLOT: usize = 16;
@@ -210,16 +210,15 @@ fn broadcast_transaction(
     table: &mut addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>,
     network: Network,
     tx: &Transaction,
-) {
+) -> bool {
     let txid = tx.compute_txid();
     let start = Instant::now();
     loop {
         if start.elapsed() >= BROADCAST_TIMEOUT {
-            warn!(target: Category::NODE, "Timed out broadcasting transaction {}", txid);
-            return;
+            break;
         }
         let Some(record) = table.select() else {
-            return;
+            break;
         };
         let (addr, port) = record.network_addr();
         let socket_addr = match addr {
@@ -243,7 +242,7 @@ fn broadcast_transaction(
                         } else if wait_for_pong(&mut reader, nonce) {
                             info!(target: Category::NODE, "Broadcast transaction {} to {:?}", txid, socket_addr);
                             table.successful_connection(&record);
-                            return;
+                            return true;
                         } else {
                             warn!(target: Category::NODE, "No pong from {:?} confirming {}", socket_addr, txid);
                         }
@@ -259,6 +258,8 @@ fn broadcast_transaction(
             }
         }
     }
+    warn!(target: Category::NODE, "Failed to broadcast transaction {}", txid);
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -321,6 +322,7 @@ fn run(
     let context = Arc::clone(&node_state.context);
     let addrman = Arc::new(Mutex::new(table));
     let addrman_for_feelers = Arc::clone(&addrman);
+    let wallet_for_broadcast = Arc::clone(&wallet);
 
     let running = Arc::new(AtomicBool::new(true));
     let running_addr = running.clone();
@@ -482,8 +484,21 @@ fn run(
         while running_feelers.load(Ordering::SeqCst) {
             match broadcast_rx.recv_timeout(Duration::from_secs(30)) {
                 Ok(tx) => {
-                    let mut table = addrman_for_feelers.lock().unwrap();
-                    broadcast_transaction(table.deref_mut(), network, &tx);
+                    let delivered = {
+                        let mut table = addrman_for_feelers.lock().unwrap();
+                        broadcast_transaction(table.deref_mut(), network, &tx)
+                    };
+                    if !delivered {
+                        warn!(
+                            target: Category::NODE,
+                            "Releasing reserved coins after failed broadcast of {}",
+                            tx.compute_txid()
+                        );
+                        wallet_for_broadcast
+                            .lock()
+                            .unwrap()
+                            .release_coins(tx.input.iter().map(|i| i.previous_output));
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     let mut table = addrman_for_feelers.lock().unwrap();
@@ -517,9 +532,11 @@ fn run(
 fn auto_import_keys(wallet: &mut Wallet, path: &str) {
     let file = SilentPaymentKeysFile::load(std::path::Path::new(path))
         .unwrap_or_else(|e| panic!("Failed to load silent payment keys from {path}: {e}"));
-    wallet
-        .import_keys(file.scan_key, file.spend_xonly())
-        .unwrap_or_else(|e| panic!("Failed to build silent payment receiver from {path}: {e}"));
+    let result = match file.spend {
+        SpendKey::Secret(spend_secret) => wallet.import_signing_keys(file.scan_key, spend_secret),
+        SpendKey::XOnlyPublic(spend_xonly) => wallet.import_keys(file.scan_key, spend_xonly),
+    };
+    result.unwrap_or_else(|e| panic!("Failed to build silent payment receiver from {path}: {e}"));
     info!(
         target: Category::NODE,
         "Imported silent payment keys from {path}"
