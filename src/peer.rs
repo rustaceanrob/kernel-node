@@ -288,11 +288,18 @@ pub fn process_message(
                     }
                 }
 
-                // If all to be expected blocks were received, clear any
-                // remaining blocks in the buffer and request a fresh batch of
-                // blocks.
+                // All expected blocks have arrived. Flush anything left in the
+                // buffer to the kernel and request the next batch. The leftovers
+                // are a competing branch from a reorg.
                 if block_state.peer_inventory.is_empty() {
-                    block_state.block_buffer.clear();
+                    let leftovers: Vec<_> =
+                        block_state.block_buffer.drain().map(|(_, b)| b).collect();
+                    for leftover in leftovers {
+                        if let Err(err) = node_state.block_tx.send(leftover) {
+                            debug!(target: Category::NODE, "Encountered error on block send: {}", err);
+                            return (PeerStateMachine::AwaitingBlock(block_state), vec![]);
+                        }
+                    }
                     let locators = build_block_locators(node_state.chainman.active_chain().tip());
                     (
                         PeerStateMachine::AwaitingInv,
