@@ -69,6 +69,9 @@ enum WalletCmd {
         /// 32-byte x-only spend public key as hex.
         spend_key: String,
     },
+    PrintKeysFromKeysFile {
+        path: PathBuf,
+    },
     /// Show wallet balance.
     Balance,
     /// Show wallet transaction history.
@@ -141,6 +144,18 @@ fn main() {
         return;
     }
 
+    if let Commands::Wallet(WalletCmd::PrintKeysFromKeysFile { path }) = &cli.commands {
+        let read = SilentPaymentKeysFile::load(path)
+            .expect("file path provided should be readable as a silent payments keys file");
+
+        let spend_pub = read.spend_xonly();
+        eprintln!("spend_pub={}", spend_pub);
+
+        let scan_priv = read.scan_key;
+        eprintln!("scan_key={}", scan_priv.display_secret());
+        return;
+    }
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -174,6 +189,9 @@ fn main() {
                 let client = wallet_response.get().unwrap().get_wallet().unwrap();
                 match cmd {
                     WalletCmd::GenerateKeys { .. } => unreachable!("handled before runtime"),
+                    WalletCmd::PrintKeysFromKeysFile { .. } => {
+                        unreachable!("handled before runtime")
+                    }
                     WalletCmd::ImportKeys {
                         scan_key,
                         spend_key,

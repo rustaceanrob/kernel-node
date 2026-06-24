@@ -16,6 +16,11 @@ Generate keys to an output file:
 cargo run --bin cli wallet generate-keys --out keys.bin
 ```
 
+Recover scan PrivateKey and spend PublicKey from file:
+```
+cargo run --bin cli wallet print-keys-from-keys-file keys.bin
+```
+
 ## Starting the daemon
 
 Using the keys file that was generated in the previous step, you can start `kernel-node` and scan for payments with these keys. Note that `--sp-keys-file` requires a fully qualified path for use with the `daemon` option. For example (`/home/me/some_directory/keys.bin`).
