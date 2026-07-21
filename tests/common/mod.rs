@@ -4,8 +4,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
+use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+use bitcoin::{
+    absolute::LockTime, key::TweakedPublicKey, transaction::Version, Address, Amount,
+    CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+};
 use corepc_node::{Conf, Node, P2P};
 use kernel_node::server_capnp::server;
+use silentpayments::sending::generate_recipient_pubkeys;
+use silentpayments::utils::sending::calculate_partial_secret;
+use silentpayments::SilentPaymentAddress;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -131,6 +141,76 @@ impl TestNode {
         }
     }
 
+    pub fn import_keys(&self, scan_key_hex: &str, spend_pub_hex: &str) {
+        let out = self.cli(&["wallet", "import-keys", scan_key_hex, spend_pub_hex]);
+        assert!(
+            out.status.success(),
+            "import-keys failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    pub fn receive_address(&self) -> String {
+        let socket = self.socket_path();
+        self.rt
+            .block_on(tokio::task::LocalSet::new().run_until(async move {
+                let client = connect(&socket).await;
+                let wallet = client
+                    .make_wallet_request()
+                    .send()
+                    .promise
+                    .await
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .get_wallet()
+                    .unwrap();
+                let response = wallet.receive_request().send().promise.await.unwrap();
+                response
+                    .get()
+                    .unwrap()
+                    .get_address()
+                    .unwrap()
+                    .to_string()
+                    .unwrap()
+            }))
+    }
+
+    pub fn balance(&self) -> Amount {
+        let socket = self.socket_path();
+        self.rt
+            .block_on(tokio::task::LocalSet::new().run_until(async move {
+                let client = connect(&socket).await;
+                let wallet = client
+                    .make_wallet_request()
+                    .send()
+                    .promise
+                    .await
+                    .unwrap()
+                    .get()
+                    .unwrap()
+                    .get_wallet()
+                    .unwrap();
+                let response = wallet.get_balance_request().send().promise.await.unwrap();
+                Amount::from_sat(response.get().unwrap().get_sats())
+            }))
+    }
+
+    pub fn wait_for_balance(&self, min: Amount, timeout: Duration) -> Amount {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let balance = self.balance();
+            if balance >= min {
+                return balance;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "balance did not reach {min} within {timeout:?} (at {balance})"
+            );
+            std::thread::sleep(TIP_POLL_INTERVAL);
+        }
+    }
+
     pub fn stop(mut self) {
         let out = self.cli(&["stop"]);
         assert!(
@@ -169,4 +249,91 @@ impl Drop for TestNode {
         let _ = self.process.kill();
         let _ = self.process.wait();
     }
+}
+
+// Core cannot send to a silent payment address, so build the BIP-352 payment
+// here, broadcast it through Core, and mine it.
+pub fn fund_silent_payment(core: &Node, sp_address: &str, amount: Amount) {
+    let secp = Secp256k1::new();
+
+    let sender_sk = SecretKey::from_slice(&[0x21; 32]).unwrap();
+    let sender_pk = CompressedPublicKey(sender_sk.public_key(&secp));
+    let sender_address = Address::p2wpkh(&sender_pk, Network::Regtest);
+
+    // 101 blocks so the first coinbase is mature.
+    core.client
+        .generate_to_address(101, &sender_address)
+        .unwrap();
+    let block1_hash: bitcoin::BlockHash = core.client.get_block_hash(1).unwrap().0.parse().unwrap();
+    let coinbase = core
+        .client
+        .get_block(block1_hash)
+        .unwrap()
+        .txdata
+        .into_iter()
+        .next()
+        .unwrap();
+    let prevout = OutPoint {
+        txid: coinbase.compute_txid(),
+        vout: 0,
+    };
+    let prev_txout = coinbase.output[0].clone();
+
+    let sp = SilentPaymentAddress::try_from(sp_address).unwrap();
+    let partial_secret = calculate_partial_secret(
+        &[(sender_sk, false)],
+        &[(prevout.txid.to_string(), prevout.vout)],
+    )
+    .unwrap();
+    let derived = generate_recipient_pubkeys(vec![sp], partial_secret).unwrap();
+    let output_key = derived
+        .get(&sp)
+        .and_then(|keys| keys.first())
+        .copied()
+        .unwrap();
+    let recipient_script =
+        ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(output_key));
+
+    let fee = Amount::from_sat(1_000);
+    let change = prev_txout.value - amount - fee;
+    let mut tx = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: prevout,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![
+            TxOut {
+                value: amount,
+                script_pubkey: recipient_script,
+            },
+            TxOut {
+                value: change,
+                script_pubkey: sender_address.script_pubkey(),
+            },
+        ],
+    };
+
+    let sighash = SighashCache::new(&tx)
+        .p2wpkh_signature_hash(
+            0,
+            &prev_txout.script_pubkey,
+            prev_txout.value,
+            EcdsaSighashType::All,
+        )
+        .unwrap();
+    let signature = secp.sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &sender_sk);
+    let mut sig_bytes = signature.serialize_der().to_vec();
+    sig_bytes.push(EcdsaSighashType::All as u8);
+    let mut witness = Witness::new();
+    witness.push(sig_bytes);
+    witness.push(sender_pk.to_bytes());
+    tx.input[0].witness = witness;
+
+    core.client.send_raw_transaction(&tx).unwrap();
+    let miner = core.client.new_address().unwrap();
+    core.client.generate_to_address(1, &miner).unwrap();
 }
