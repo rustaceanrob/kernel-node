@@ -17,6 +17,8 @@ use silentpayments::sending::generate_recipient_pubkeys;
 use silentpayments::utils::sending::calculate_partial_secret;
 use silentpayments::SilentPaymentAddress;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use wallet::io::FileExt;
+use wallet::silentpayments::{SilentPaymentKeysFile, SpendKey};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(45);
@@ -31,6 +33,13 @@ pub fn start_bitcoind() -> Node {
     let mut conf = Conf::default();
     conf.p2p = P2P::Yes;
     Node::with_conf(exe, &conf).unwrap()
+}
+
+pub fn random_signing_keys() -> SilentPaymentKeysFile {
+    let mut rng = bitcoin::secp256k1::rand::rngs::OsRng;
+    let scan = SecretKey::new(&mut rng);
+    let spend = SecretKey::new(&mut rng);
+    SilentPaymentKeysFile::new(scan, SpendKey::Secret(spend))
 }
 
 async fn connect(socket_path: &Path) -> server::Client {
@@ -59,21 +68,30 @@ pub struct TestNode {
 
 impl TestNode {
     pub fn start() -> Self {
-        Self::start_connected(CLOSED_PEER)
+        Self::start_connected(CLOSED_PEER, None)
     }
 
-    pub fn start_connected(peer: impl std::fmt::Display) -> Self {
+    pub fn start_connected(
+        peer: impl std::fmt::Display,
+        keys: Option<SilentPaymentKeysFile>,
+    ) -> Self {
         let tempdir = tempfile::tempdir().unwrap();
         let datadir = tempdir.path().canonicalize().unwrap();
-        let process = Command::new(env!("CARGO_BIN_EXE_node"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_node"));
+        command
             .arg("--network")
             .arg("regtest")
             .arg("--datadir")
             .arg(&datadir)
             .arg("--connect")
-            .arg(peer.to_string())
-            .spawn()
-            .unwrap();
+            .arg(peer.to_string());
+        // With no keys, the node starts without a wallet.
+        if let Some(keys) = keys {
+            let keys_path = datadir.join("keys.bin");
+            keys.save(&keys_path).unwrap();
+            command.arg("--sp-keys-file").arg(&keys_path);
+        }
+        let process = command.spawn().unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -248,6 +266,21 @@ impl Drop for TestNode {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+    }
+}
+
+pub fn wait_for_core_mempool(core: &Node, txid: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mempool = core.client.get_raw_mempool().unwrap();
+        if mempool.0.iter().any(|entry| entry == txid) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Core did not accept {txid} within {timeout:?}"
+        );
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 

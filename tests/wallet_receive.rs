@@ -15,7 +15,7 @@ fn receives_a_silent_payment() {
     let p2p = core.params.p2p_socket.unwrap();
     println!("step 1/5: bitcoind started on regtest");
 
-    let node = TestNode::start_connected(p2p);
+    let node = TestNode::start_connected(p2p, None);
     println!("step 2/5: node started and connected to Core");
 
     let secp = Secp256k1::new();
