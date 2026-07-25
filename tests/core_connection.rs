@@ -12,7 +12,7 @@ fn connects_to_bitcoin_core() {
     let core = start_bitcoind();
     let p2p = core.params.p2p_socket.unwrap();
 
-    let node = TestNode::start_connected(p2p);
+    let node = TestNode::start_connected(p2p, None);
 
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {

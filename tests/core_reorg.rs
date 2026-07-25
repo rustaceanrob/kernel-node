@@ -23,7 +23,7 @@ fn follows_bitcoin_core_reorg() {
     let initial_hash = core.client.best_block_hash().expect("best block hash");
 
     let p2p = core.params.p2p_socket.expect("bitcoind p2p socket");
-    let node = TestNode::start_connected(p2p);
+    let node = TestNode::start_connected(p2p, None);
     node.wait_for_tip(initial_height, initial_hash, SYNC_TIMEOUT);
 
     let fork_block = core

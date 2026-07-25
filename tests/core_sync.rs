@@ -20,7 +20,7 @@ fn follows_bitcoin_core_chain() {
     assert_eq!(core_height, BLOCKS as u64);
 
     let p2p = core.params.p2p_socket.expect("bitcoind p2p socket");
-    let node = TestNode::start_connected(p2p);
+    let node = TestNode::start_connected(p2p, None);
 
     node.wait_for_tip(core_height, core_hash, SYNC_TIMEOUT);
 
