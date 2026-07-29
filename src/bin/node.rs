@@ -366,6 +366,9 @@ fn run(
                     continue;
                 }
             };
+            if !running_peer.load(Ordering::SeqCst) {
+                break;
+            }
             loop {
                 if let Err(e) = peer.receive_and_process_message(&mut node_state) {
                     match e {
@@ -386,7 +389,7 @@ fn run(
     let addr_processing_handler = thread::spawn(move || {
         info!(target: Category::NODE, "Starting addr processing thread.");
         while running_addr.load(Ordering::SeqCst) {
-            match addr_rx.recv() {
+            match addr_rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(payload) => {
                     let mut addr_lock = addrman.lock().unwrap();
                     for address in payload {
@@ -399,7 +402,8 @@ fn run(
                         addr_lock.add(&record);
                     }
                 }
-                Err(_) => break,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
         info!(target: Category::NODE, "Stopping addr processing thread.");
@@ -516,13 +520,13 @@ fn run(
     });
 
     if let Ok(()) = shutdown_rx.recv() {
+        info!(target: Category::NODE, "Received shutdown signal, shutting down...");
+        running.store(false, Ordering::SeqCst);
         context.interrupt().unwrap();
         let mut peer_lock = kill.lock().unwrap();
         if let Some(conn) = peer_lock.deref_mut() {
             conn.shutdown().unwrap()
         }
-        info!(target: Category::NODE, "Received shutdown signal, shutting down...");
-        running.store(false, Ordering::SeqCst);
     }
 
     addr_processing_handler.join().unwrap();
