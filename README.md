@@ -27,10 +27,17 @@ Options:
 
 ```
 Arguments:
-        --network    Which Bitcoin network to use.
-        --datadir    Data directory for blockchain and configuration.
-        --connect    Connect only to this node (format: ip:port or hostname:port)
-        --daemon     Run the server as a daemon
+        --network        Which Bitcoin network to use.
+        --datadir        Data directory for blockchain and configuration.
+        --connect        Connect only to this node (format: ip:port or hostname:port)
+        --daemon         Run the server as a daemon
+        --sp-keys-file   Path to a binary silent payments keys file to import at startup.
+```
+
+Or use the interactive wizard to walk through the options and start the node:
+
+```
+cargo run --bin wizard
 ```
 
 ## Bitcoin Core Compatibility
