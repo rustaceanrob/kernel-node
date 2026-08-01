@@ -24,20 +24,26 @@ fn unix_home_dir() -> PathBuf {
     home_dir_string.parse::<PathBuf>().unwrap()
 }
 
+pub trait ExpandTildeExt {
+    fn expand_tilde(&self) -> PathBuf;
+}
+
+impl<S: AsRef<str>> ExpandTildeExt for S {
+    fn expand_tilde(&self) -> PathBuf {
+        match self.as_ref().strip_prefix("~/") {
+            Some(rest) => unix_home_dir().join(rest),
+            None => PathBuf::from(self.as_ref()),
+        }
+    }
+}
+
 pub trait DirnameExt {
     fn data_dir(&self) -> String;
 }
 
 impl<S: AsRef<str>> DirnameExt for S {
     fn data_dir(&self) -> String {
-        let string = self.as_ref();
-        let path = match string.strip_prefix("~/") {
-            Some(rest) => {
-                let home_path = unix_home_dir();
-                home_path.join(rest)
-            }
-            None => PathBuf::from(string),
-        };
+        let path = self.expand_tilde();
         // Create directories if they don't exist
         fs::create_dir_all(&path).unwrap();
 

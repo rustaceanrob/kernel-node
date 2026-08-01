@@ -45,3 +45,6 @@ name = "node"
 
 [[bin]]
 name = "cli"
+
+[[bin]]
+name = "wizard"
