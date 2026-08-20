@@ -229,6 +229,21 @@ impl TestNode {
         }
     }
 
+    pub fn wait_for_balance_of(&self, expected: Amount, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let balance = self.balance();
+            if balance == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "balance did not settle at {expected} within {timeout:?} (at {balance})"
+            );
+            std::thread::sleep(TIP_POLL_INTERVAL);
+        }
+    }
+
     pub fn stop(mut self) {
         let out = self.cli(&["stop"]);
         assert!(
