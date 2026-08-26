@@ -155,7 +155,7 @@ fn create_getdata_message(block_hashes: &[bitcoin::BlockHash]) -> NetworkMessage
 pub fn process_message(
     state_machine: PeerStateMachine,
     event: NetworkMessage,
-    node_state: &mut NodeState,
+    node_state: &NodeState,
 ) -> (PeerStateMachine, Vec<NetworkMessage>) {
     // Always process the ping first as a special case.
     if let NetworkMessage::Ping(nonce) = event {
@@ -334,7 +334,7 @@ impl BitcoinPeer {
     pub fn new(
         socket_addr: SocketAddr,
         network: Network,
-        node_state: &mut NodeState,
+        node_state: &NodeState,
     ) -> Result<Self, p2p::net::Error> {
         let height = node_state.chainman.active_chain().height();
         let conf = ConnectionConfig::new()
@@ -373,7 +373,7 @@ impl BitcoinPeer {
 
     pub fn receive_and_process_message(
         &mut self,
-        node_state: &mut NodeState,
+        node_state: &NodeState,
     ) -> Result<(), p2p::net::Error> {
         let msg = self.receive_message()?;
         let old_state = std::mem::take(&mut self.state_machine);
