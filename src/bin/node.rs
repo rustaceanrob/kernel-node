@@ -158,6 +158,7 @@ static mut GLOBAL_LOG_CALLBACK_HOLDER: Option<Logger> = None;
 fn setup_logging() {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    builder.format_timestamp(None);
     builder.init();
 
     unsafe { GLOBAL_LOG_CALLBACK_HOLDER = Some(Logger::new(KernelLog {}).unwrap()) };
