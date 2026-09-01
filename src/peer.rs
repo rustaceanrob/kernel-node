@@ -16,8 +16,7 @@ use bitcoin::{
 };
 use bitcoin::{BlockHash, Network};
 use bitcoinkernel::{
-    core::BlockHashExt, prelude::BlockValidationStateExt, BlockTreeEntry, ChainstateManager,
-    Context, ProcessBlockHeaderResult, ValidationMode,
+    core::BlockHashExt, BlockTreeEntry, ChainstateManager, Context, ProcessBlockHeaderResult,
 };
 use log::{debug, info, warn};
 use p2p::{
@@ -177,9 +176,7 @@ pub fn process_message(
                 for header in headers.into_iter() {
                     let result = node_state.chainman.process_block_header(&header.convert());
                     match result {
-                        ProcessBlockHeaderResult::Success(state)
-                            if state.mode() == ValidationMode::Valid =>
-                        {
+                        Ok(ProcessBlockHeaderResult::Valid) => {
                             debug!(target: Category::KERNEL, "Processed header: {}", header.time);
                             continue;
                         }
@@ -216,7 +213,7 @@ pub fn process_message(
                     let block_hash = header.block_hash();
                     let valid = matches!(
                         node_state.chainman.process_block_header(&header.convert()),
-                        ProcessBlockHeaderResult::Success(s) if s.mode() == ValidationMode::Valid
+                        Ok(ProcessBlockHeaderResult::Valid)
                     );
                     if !valid {
                         warn!(target: Category::KERNEL, "Rejected announced header {}", block_hash);
