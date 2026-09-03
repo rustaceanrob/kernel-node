@@ -15,7 +15,7 @@ use corepc_node::{Conf, Node, P2P};
 use kernel_node::server_capnp::server;
 use silentpayments::sending::generate_recipient_pubkeys;
 use silentpayments::utils::sending::calculate_partial_secret;
-use silentpayments::SilentPaymentAddress;
+use silentpayments::SilentPaymentCode;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
 use wallet::silentpayments::{SilentPaymentKeysFile, SpendKey};
@@ -312,15 +312,18 @@ pub fn fund_silent_payment(core: &Node, sp_address: &str, amount: Amount) {
     };
     let prev_txout = coinbase.output[0].clone();
 
-    let sp = SilentPaymentAddress::try_from(sp_address).unwrap();
+    let sp = SilentPaymentCode::try_from(sp_address).unwrap();
+    let mut buf = [0u8; 36];
+    buf[..32].copy_from_slice(&prevout.txid.to_byte_array());
+    buf[32..].copy_from_slice(&prevout.vout.to_le_bytes());
     let partial_secret = calculate_partial_secret(
         &[(sender_sk, false)],
-        &[(prevout.txid.to_string(), prevout.vout)],
+        &[silentpayments::utils::OutPoint::from_bytes(buf)],
     )
     .unwrap();
-    let derived = generate_recipient_pubkeys(vec![sp], partial_secret).unwrap();
+    let derived = generate_recipient_pubkeys(vec![sp.into()], partial_secret).unwrap();
     let output_key = derived
-        .get(&sp)
+        .get(&sp.into())
         .and_then(|keys| keys.first())
         .copied()
         .unwrap();

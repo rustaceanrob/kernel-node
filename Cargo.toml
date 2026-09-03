@@ -35,7 +35,7 @@ configure_me_codegen = "0.4.0"
 [dev-dependencies]
 tempfile = "3"
 corepc-node = { version = "0.12.0", default-features = false, features = ["30_2", "download"] }
-silentpayments = { version = "0.5", features = ["sending", "encode"] }
+silentpayments = { version = "0.7", features = ["sending", "encode"] }
 
 [package.metadata.configure_me]
 spec = "config_spec.toml"

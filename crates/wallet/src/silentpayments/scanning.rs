@@ -2,8 +2,8 @@ use ::silentpayments::{
     receiving::{Label, Receiver},
     utils::receiving::{calculate_ecdh_shared_secret, calculate_tweak_data, get_pubkey_from_input},
 };
-use bitcoin::consensus::encode;
 use bitcoin::secp256k1::{self, Scalar, SecretKey, XOnlyPublicKey};
+use bitcoin::{consensus::encode, hashes::Hash};
 use bitcoin::{OutPoint, Script, Transaction};
 use bitcoinkernel::prelude::{
     BlockSpentOutputsExt, CoinExt, ScriptPubkeyExt, TransactionExt, TransactionSpentOutputsExt,
@@ -16,8 +16,7 @@ pub struct InputData {
     pub script_sig: Vec<u8>,
     pub witness: Vec<Vec<u8>>,
     pub prevout_script: Vec<u8>,
-    pub txid: String,
-    pub vout: u32,
+    pub outpoint: silentpayments::utils::OutPoint,
 }
 
 pub fn scan_transaction(
@@ -33,7 +32,7 @@ pub fn scan_transaction(
             get_pubkey_from_input(&input.script_sig, &input.witness, &input.prevout_script)
         {
             input_pub_keys.push(pk);
-            outpoints.push((input.txid.clone(), input.vout));
+            outpoints.push(input.outpoint);
         }
     }
 
@@ -69,7 +68,7 @@ pub fn scan_transaction(
     let shared_secret = calculate_ecdh_shared_secret(&tweak_data, b_scan);
 
     let xonly_outputs: Vec<XOnlyPublicKey> = taproot_outputs.iter().map(|(_, pk)| *pk).collect();
-    let found = match receiver.scan_transaction(&shared_secret, xonly_outputs) {
+    let found = match receiver.scan_transaction(&shared_secret, &xonly_outputs) {
         Ok(f) => f,
         Err(_) => return vec![],
     };
@@ -119,12 +118,14 @@ pub(crate) fn scan_block_inner(
             let coin = tx_spent
                 .coin(input_idx)
                 .expect("input/spent-output count mismatch");
+            let mut buf = [0u8; 36];
+            buf[..32].copy_from_slice(&btc_input.previous_output.txid.to_byte_array());
+            buf[32..].copy_from_slice(&btc_input.previous_output.vout.to_le_bytes());
             inputs.push(InputData {
                 script_sig: btc_input.script_sig.as_bytes().to_vec(),
                 witness: btc_input.witness.iter().map(|item| item.to_vec()).collect(),
                 prevout_script: coin.output().script_pubkey().to_bytes(),
-                txid: btc_input.previous_output.txid.to_string(),
-                vout: btc_input.previous_output.vout,
+                outpoint: silentpayments::utils::OutPoint::from_bytes(buf),
             });
         }
 

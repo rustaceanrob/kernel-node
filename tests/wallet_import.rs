@@ -3,7 +3,7 @@ mod common;
 use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::{Secp256k1, SecretKey};
 use common::TestNode;
-use silentpayments::SilentPaymentAddress;
+use silentpayments::SilentPaymentCode;
 
 #[test]
 fn imports_keys_over_the_cli() {
@@ -22,7 +22,7 @@ fn imports_keys_over_the_cli() {
     node.import_keys(&scan_hex, &spend_pub_hex);
 
     let address = node.receive_address();
-    SilentPaymentAddress::try_from(address.as_str())
+    SilentPaymentCode::try_from(address.as_str())
         .expect("import should yield a valid silent payment address");
 
     node.stop();

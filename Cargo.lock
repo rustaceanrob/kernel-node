@@ -120,12 +120,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
-name = "bimap"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
-
-[[package]]
 name = "bitcoin"
 version = "0.32.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -435,7 +429,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f8749105873c391b77fc943b7fdf8c05b6c1d06f6e71c6d2746ee7f8bda0072"
 dependencies = [
  "anyhow",
- "bitcoin_hashes 0.13.1",
+ "bitcoin_hashes 0.14.1",
  "bitreq 0.3.7",
  "corepc-client",
  "flate2",
@@ -697,6 +691,9 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hex-conservative"
@@ -1205,12 +1202,11 @@ dependencies = [
 
 [[package]]
 name = "silentpayments"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "131d42e3050dd88c79e4849b27eaf0cda0625f4e910d97bf05044a1300459f85"
+checksum = "beafae1833afa771481d8943492e5f1faf4f5582f9eca5db2ed6bce6ee05ef7e"
 dependencies = [
  "bech32 0.9.1",
- "bimap",
  "bitcoin_hashes 0.13.1",
  "hex",
  "secp256k1",
