@@ -225,7 +225,7 @@ impl Wallet {
     pub fn receive_address(&self) -> Option<String> {
         self.keys
             .as_ref()
-            .map(|k| k.receiver.get_receiving_address().to_string())
+            .map(|k| k.receiver.receiving_code().to_string())
     }
 
     pub fn balance(&self) -> Amount {

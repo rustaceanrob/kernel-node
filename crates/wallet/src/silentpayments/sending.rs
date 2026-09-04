@@ -18,7 +18,7 @@ use bitcoin::{
 };
 use silentpayments::sending::generate_recipient_pubkeys;
 use silentpayments::utils::sending::calculate_partial_secret;
-use silentpayments::{Network, SilentPaymentAddress};
+use silentpayments::{Network, SilentPaymentCode, SilentPaymentKeyMaterial};
 
 use crate::silentpayments::wallet::{Coin, Wallet};
 
@@ -102,14 +102,14 @@ impl From<bitcoin::sighash::TaprootError> for SendError {
 }
 
 pub enum Recipient {
-    SilentPayment(SilentPaymentAddress),
+    SilentPayment(SilentPaymentCode),
     Address(Address),
 }
 
 impl Recipient {
     pub fn parse(s: &str, network: Network) -> Result<Self, SendError> {
-        if let Ok(sp) = SilentPaymentAddress::try_from(s) {
-            if sp.get_network() != network {
+        if let Ok(sp) = SilentPaymentCode::try_from(s) {
+            if sp.network() != network {
                 return Err(SendError::NetworkMismatch);
             }
             return Ok(Recipient::SilentPayment(sp));
@@ -145,7 +145,7 @@ impl Wallet {
     ) -> Result<Transaction, SendError> {
         let spend_secret = self.spend_secret.ok_or(SendError::WatchOnly)?;
         let keys = self.keys.as_ref().ok_or(SendError::WatchOnly)?;
-        let change_address = keys.receiver.get_change_address();
+        let change_address = keys.receiver.change_code();
 
         let coins: Vec<SpendableCoin> = self
             .utxos
@@ -178,7 +178,7 @@ fn build_transaction(
     fee_rate: FeeRate,
     long_term_fee_rate: FeeRate,
     tip_height: u32,
-    change_address: SilentPaymentAddress,
+    change_address: SilentPaymentCode,
     coins: &[SpendableCoin],
 ) -> Result<Transaction, SendError> {
     if coins.is_empty() {
@@ -230,22 +230,27 @@ fn build_transaction(
 
     let change_value = drain.is_some().then(|| Amount::from_sat(drain.value));
     let recipient_is_sp = matches!(recipient, Recipient::SilentPayment(_));
-    let derived: HashMap<SilentPaymentAddress, Vec<XOnlyPublicKey>> = if recipient_is_sp
+    let derived: HashMap<SilentPaymentKeyMaterial, Vec<XOnlyPublicKey>> = if recipient_is_sp
         || change_value.is_some()
     {
         // true marks each key as taproot since every silent payment coin is a P2TR output
         let input_keys: Vec<(SecretKey, bool)> = signing_keys.iter().map(|k| (*k, true)).collect();
-        let outpoints: Vec<(String, u32)> = selected
+        let outpoints: Vec<silentpayments::utils::OutPoint> = selected
             .iter()
-            .map(|c| (c.outpoint.txid.to_string(), c.outpoint.vout))
+            .map(|c| {
+                let mut buf = [0u8; 36];
+                buf[..32].copy_from_slice(&c.outpoint.txid.to_byte_array());
+                buf[32..].copy_from_slice(&c.outpoint.vout.to_le_bytes());
+                silentpayments::utils::OutPoint::from_bytes(buf)
+            })
             .collect();
         let partial_secret = calculate_partial_secret(&input_keys, &outpoints)?;
-        let mut sp_addrs = Vec::new();
+        let mut sp_addrs: Vec<SilentPaymentKeyMaterial> = Vec::new();
         if let Recipient::SilentPayment(sp) = &recipient {
-            sp_addrs.push(*sp);
+            sp_addrs.push(sp.into());
         }
         if change_value.is_some() {
-            sp_addrs.push(change_address);
+            sp_addrs.push(change_address.into());
         }
         generate_recipient_pubkeys(sp_addrs, partial_secret)?
     } else {
@@ -366,11 +371,11 @@ fn output_weight(script_len: usize) -> Weight {
 }
 
 fn sp_output_script(
-    derived: &HashMap<SilentPaymentAddress, Vec<XOnlyPublicKey>>,
-    address: SilentPaymentAddress,
+    derived: &HashMap<SilentPaymentKeyMaterial, Vec<XOnlyPublicKey>>,
+    address: SilentPaymentCode,
 ) -> Result<ScriptBuf, SendError> {
     let xonly = derived
-        .get(&address)
+        .get(&address.into())
         .and_then(|keys| keys.first())
         .ok_or(SendError::OutputDerivation)?;
     Ok(p2tr_script(*xonly))
@@ -403,12 +408,12 @@ mod tests {
         }
     }
 
-    fn address(scan: SecretKey, spend: SecretKey) -> SilentPaymentAddress {
+    fn address(scan: SecretKey, spend: SecretKey) -> SilentPaymentCode {
         let secp = Secp256k1::new();
         let spend_pub = spend.public_key(&secp);
         build_receiver(&scan, spend_pub, Network::Regtest)
             .unwrap()
-            .get_receiving_address()
+            .receiving_code()
     }
 
     fn owned_coin(spend_secret: &SecretKey, tweak: Scalar, value: Amount) -> Coin {
@@ -439,7 +444,7 @@ mod tests {
             Network::Regtest,
         )
         .unwrap()
-        .get_change_address();
+        .change_code();
 
         let recipient = address(even_secret([0x03; 32]), even_secret([0x04; 32]));
 
@@ -678,7 +683,7 @@ mod tests {
             Network::Regtest,
         )
         .unwrap()
-        .get_change_address();
+        .change_code();
         let recipient = address(even_secret([0x03; 32]), even_secret([0x04; 32]));
 
         let owned: Vec<Coin> = [55_000u64, 30_000, 20_000]

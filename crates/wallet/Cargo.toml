@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-silentpayments = { version = "0.5", features = ["receiving", "encode", "sending"] }
+silentpayments = { version = "0.7", features = [
+  "receiving",
+  "encode",
+  "sending",
+] }
 bitcoin = { version = "0.32.8", features = ["rand-std"] }
 bitcoinkernel = "0.3"
 log = "0.4"
