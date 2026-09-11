@@ -100,27 +100,20 @@ fn build_block_locators(tip: BlockTreeEntry<'_>) -> Vec<BlockHash> {
     let height = tip.height();
     assert!(height >= 0);
     let mut locators = Vec::with_capacity(MAX_LOCATOR_HASHES);
-    let mut entry = tip;
-    let mut current_height = height as usize;
-    let mut step: usize = 1;
+    let mut current_height = height;
+    let mut step = 1;
     loop {
+        let entry = tip
+            .ancestor(current_height)
+            .expect("height is between zero and the tip height");
         let hash = BlockHash::from_byte_array(entry.block_hash().to_bytes());
         locators.push(hash);
         if current_height == 0 || locators.len() >= MAX_LOCATOR_HASHES {
             break;
         }
+        current_height = (current_height - step).max(0);
         if locators.len() > 10 {
             step *= 2;
-        }
-        let target = current_height.saturating_sub(step);
-        while current_height > target {
-            match entry.prev() {
-                Some(prev) => {
-                    entry = prev;
-                    current_height -= 1;
-                }
-                None => break,
-            }
         }
     }
     locators
