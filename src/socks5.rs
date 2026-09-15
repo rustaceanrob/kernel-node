@@ -77,21 +77,33 @@ impl SocksDestination for Ipv6Addr {
 #[derive(Debug, Clone)]
 pub struct Socks5Proxy {
     proxy: SocketAddr,
-    timeout: Duration,
+    connect_timeout: Duration,
+    request_timeout: Duration,
 }
 
 impl Socks5Proxy {
     pub const DEFAULT_TOR_PROXY: Self = Self {
         proxy: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9050),
-        timeout: Duration::from_secs(1),
+        connect_timeout: Duration::from_secs(1),
+        request_timeout: Duration::from_secs(30),
     };
 
-    pub const fn from_proxy_socket_addr(proxy: SocketAddr, timeout: Duration) -> Self {
-        Self { proxy, timeout }
+    pub const fn from_proxy_socket_addr(
+        proxy: SocketAddr,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Self {
+        Self {
+            proxy,
+            connect_timeout,
+            request_timeout,
+        }
     }
 
     pub fn connect<D: SocksDestination>(&self, addr: D, port: u16) -> std::io::Result<TcpStream> {
-        let mut tcp_stream = TcpStream::connect_timeout(&self.proxy, self.timeout)?;
+        let mut tcp_stream = TcpStream::connect_timeout(&self.proxy, self.connect_timeout)?;
+        tcp_stream.set_read_timeout(Some(self.request_timeout))?;
+        tcp_stream.set_write_timeout(Some(self.request_timeout))?;
         tcp_stream.write_all(&[VERSION, METHODS, NOAUTH])?;
         let mut resp_buf = [0_u8; 2];
         tcp_stream.read_exact(&mut resp_buf)?;

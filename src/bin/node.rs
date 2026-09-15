@@ -30,6 +30,7 @@ use kernel_node::{
     peer_manager::PeerManager,
     resolve_seeds,
     server_capnp::server,
+    socks5::Socks5Proxy,
     FatalShutdown, ScanEvent,
 };
 use log::{debug, error, info, warn};
@@ -255,6 +256,7 @@ fn broadcast_transaction(
 fn run(
     network: Network,
     connect: Option<SocketAddr>,
+    proxy: Option<Socks5Proxy>,
     node_state: NodeState,
     shutdown_rx: mpsc::Receiver<()>,
     addr_rx: mpsc::Receiver<Vec<AddrV2Message>>,
@@ -329,6 +331,9 @@ fn run(
     );
     if connect.is_some() {
         peer_manager = peer_manager.max_peers(1);
+    }
+    if let Some(proxy) = proxy {
+        peer_manager = peer_manager.socks5_proxy(proxy);
     }
     peer_manager.start();
     let peer_writers = peer_manager.peer_writers().to_vec();
@@ -609,6 +614,24 @@ fn main() {
         .connect
         .map(|sock| sock.parse::<SocketAddr>().unwrap());
 
+    let proxy = match config.proxy.as_ref() {
+        Some(s) => match s.parse::<SocketAddr>() {
+            Ok(addr) => Some(Socks5Proxy::from_proxy_socket_addr(
+                addr,
+                Duration::from_secs(1),
+                Duration::from_secs(30),
+            )),
+            Err(e) => {
+                fatal.trigger(
+                    Category::NODE,
+                    format!("Invalid --proxy address {s}: {e}"),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
+
     if shutdown_rx.try_recv().is_ok() {
         info!(target: Category::NODE, "Shutting down!");
         return;
@@ -669,6 +692,7 @@ fn main() {
     run(
         network,
         connect,
+        proxy,
         node_state,
         shutdown_rx,
         addr_rx,
