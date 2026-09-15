@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    net::SocketAddr,
     ops::DerefMut,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -17,6 +16,7 @@ use p2p::net::ConnectionWriter;
 use crate::{
     logging::Category,
     peer::{BitcoinPeer, NodeState},
+    socks5::Socks5Proxy,
     FatalShutdown,
 };
 
@@ -39,10 +39,11 @@ pub struct PeerManager {
     addrman: Arc<Mutex<AddrTable>>,
     node_state: Arc<NodeState>,
     network: Network,
+    proxy: Option<Socks5Proxy>,
     running: Arc<AtomicBool>,
     peer_threads: Vec<thread::JoinHandle<()>>,
     peer_writers: Vec<Arc<Mutex<Option<Arc<ConnectionWriter>>>>>,
-    connected_peers: Arc<Mutex<HashSet<SocketAddr>>>,
+    connected_peers: Arc<Mutex<HashSet<(AddrV2, u16)>>>,
 }
 
 impl PeerManager {
@@ -58,6 +59,7 @@ impl PeerManager {
             addrman,
             node_state,
             network,
+            proxy: None,
             running: Arc::new(AtomicBool::new(true)),
             peer_threads: Vec::new(),
             peer_writers: Vec::new(),
@@ -67,6 +69,11 @@ impl PeerManager {
 
     pub fn max_peers(mut self, n: usize) -> Self {
         self.max_peers = n.max(1);
+        self
+    }
+
+    pub fn socks5_proxy(mut self, proxy: Socks5Proxy) -> Self {
+        self.proxy = Some(proxy);
         self
     }
 
@@ -81,6 +88,7 @@ impl PeerManager {
             let addrman = Arc::clone(&self.addrman);
             let node_state = Arc::clone(&self.node_state);
             let network = self.network;
+            let proxy = self.proxy.clone();
             let writer_slot: Arc<Mutex<Option<Arc<ConnectionWriter>>>> = Arc::new(Mutex::new(None));
             let writer_slot_thread = Arc::clone(&writer_slot);
             self.peer_writers.push(writer_slot);
@@ -95,9 +103,9 @@ impl PeerManager {
                         let table = addrman.lock().unwrap();
                         table.select().map(|record| record.network_addr())
                     };
-                    let socket_addr = match selected {
-                        Some((AddrV2::Ipv4(ipv4), port)) => SocketAddr::from((ipv4, port)),
-                        Some((AddrV2::Ipv6(ipv6), port)) => SocketAddr::from((ipv6, port)),
+                    let (addr, port) = match selected {
+                        Some((addr @ (AddrV2::Ipv4(_) | AddrV2::Ipv6(_)), port)) => (addr, port),
+                        Some((addr @ AddrV2::TorV3(_), port)) if proxy.is_some() => (addr, port),
                         Some(_) => continue,
                         None => {
                             empty_selections += 1;
@@ -116,25 +124,32 @@ impl PeerManager {
                         }
                     };
                     empty_selections = 0;
+                    let key = (addr.clone(), port);
 
                     {
                         let mut connected = connected_peers.lock().unwrap();
-                        if !connected.insert(socket_addr) {
+                        if !connected.insert(key.clone()) {
                             drop(connected);
-                            debug!(target: Category::NET, "Peer thread {}: {} already connected", i, socket_addr);
+                            debug!(target: Category::NET, "Peer thread {}: {:?} already connected", i, key);
                             thread::sleep(Duration::from_secs(1));
                             continue;
                         }
                     }
 
-                    let mut peer = match BitcoinPeer::new(socket_addr, network, &node_state) {
+                    let mut peer = match BitcoinPeer::new(
+                        addr,
+                        port,
+                        network,
+                        &node_state,
+                        proxy.as_ref(),
+                    ) {
                         Ok(peer) => {
                             *writer_slot_thread.lock().unwrap() = Some(peer.writer());
                             peer
                         }
                         Err(e) => {
-                            error!(target: Category::NET, "Peer thread {}: could not connect to {}: {}", i, socket_addr, e);
-                            connected_peers.lock().unwrap().remove(&socket_addr);
+                            error!(target: Category::NET, "Peer thread {}: could not connect to {:?}: {}", i, key, e);
+                            connected_peers.lock().unwrap().remove(&key);
                             thread::sleep(Duration::from_millis(500));
                             continue;
                         }
@@ -157,7 +172,7 @@ impl PeerManager {
                         }
                     }
 
-                    connected_peers.lock().unwrap().remove(&socket_addr);
+                    connected_peers.lock().unwrap().remove(&key);
                     *writer_slot_thread.lock().unwrap() = None;
                 }
                 info!(target: Category::NET, "Peer thread {} stopped", i);
