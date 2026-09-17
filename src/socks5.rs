@@ -25,7 +25,6 @@ const TOR_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(15);
 // Timeout to reach the local proxy. This should be hosted on the local machine usually.
 const SOCKS_SERVER_TIMEOUT: Duration = Duration::from_secs(1);
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash)]
 pub struct OnionAddress([u8; 32]);
 
