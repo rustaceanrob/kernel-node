@@ -7,12 +7,17 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use bitcoin::{p2p::address::AddrV2, Network};
-use log::{debug, error, info};
-use p2p::net::ConnectionWriter;
+use bitcoin::p2p::{address::AddrV2, message::NetworkMessage, ServiceFlags};
+use bitcoin::secp256k1::rand::random;
+use bitcoin::{Network, Transaction};
+use log::{debug, error, info, warn};
+use p2p::{
+    handshake::ConnectionConfig,
+    net::{ConnectionExt, ConnectionReader, ConnectionWriter, TimeoutParams},
+};
 
 use crate::{
     logging::Category,
@@ -34,6 +39,10 @@ const DEFAULT_MAX_PEERS: usize = 8;
 /// hides the problem.
 const EMPTY_ADDRESS_BOOK_LIMIT: u32 = 60;
 
+const BROADCAST_TIMEOUT: Duration = Duration::from_secs(60);
+const BROADCAST_PONG_TIMEOUT: Duration = Duration::from_secs(5);
+const FEELER_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct PeerManager {
     max_peers: usize,
     fatal: FatalShutdown,
@@ -45,6 +54,7 @@ pub struct PeerManager {
     peer_writers: Vec<Arc<Mutex<Option<Arc<ConnectionWriter>>>>>,
     connected_peers: Arc<Mutex<HashSet<Destination>>>,
     proxy: Option<Socks5Proxy>,
+    feeler_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl PeerManager {
@@ -65,6 +75,7 @@ impl PeerManager {
             peer_writers: Vec::new(),
             connected_peers: Arc::new(Mutex::new(HashSet::new())),
             proxy: None,
+            feeler_thread: None,
         }
     }
 
@@ -185,6 +196,26 @@ impl PeerManager {
             });
             self.peer_threads.push(handle);
         }
+
+        let running = Arc::clone(&self.running);
+        let addrman = Arc::clone(&self.addrman);
+        let network = self.network;
+        let proxy = self.proxy.clone();
+        let handle = thread::spawn(move || {
+            info!(target: Category::NODE, "Starting feeler thread.");
+            let mut last_feeler = Instant::now();
+            while running.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_secs(1));
+                if last_feeler.elapsed() < FEELER_INTERVAL {
+                    continue;
+                }
+                let mut table = addrman.lock().unwrap();
+                open_feeler(table.deref_mut(), network, proxy.as_ref());
+                last_feeler = Instant::now();
+            }
+            info!(target: Category::NODE, "Stopping feeler thread.");
+        });
+        self.feeler_thread = Some(handle);
     }
 
     pub fn stop(&self) {
@@ -196,11 +227,178 @@ impl PeerManager {
         }
     }
 
-    pub fn join(self) {
+    pub fn join(mut self) {
         for handle in self.peer_threads {
             let _ = handle.join();
         }
+        if let Some(handle) = self.feeler_thread.take() {
+            let _ = handle.join();
+        }
     }
+
+    pub fn broadcaster(&self) -> Broadcaster {
+        Broadcaster {
+            addrman: Arc::clone(&self.addrman),
+            network: self.network,
+            proxy: self.proxy.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Broadcaster {
+    addrman: Arc<Mutex<AddrTable>>,
+    network: Network,
+    proxy: Option<Socks5Proxy>,
+}
+
+impl Broadcaster {
+    pub fn broadcast_transaction(&self, tx: &Transaction) -> bool {
+        let mut table = self.addrman.lock().unwrap();
+        broadcast_transaction(table.deref_mut(), self.network, self.proxy.as_ref(), tx)
+    }
+}
+
+fn open_feeler(table: &mut AddrTable, network: Network, proxy: Option<&Socks5Proxy>) {
+    let Some(record) = table.select() else {
+        return;
+    };
+    let (addr, port) = record.network_addr();
+    let dest = Destination { addr, port };
+    let conf = ConnectionConfig::new()
+        .change_network(network)
+        .set_service_requirement(ServiceFlags::NETWORK)
+        .offer_services(ServiceFlags::WITNESS)
+        .user_agent("/kernel-node:0.1.0/".into());
+    let timeouts = TimeoutParams::new();
+    let result: Result<_, p2p::net::Error> = match proxy {
+        Some(proxy) => {
+            let conn = match dest.addr {
+                AddrV2::Ipv4(ipv4) => proxy.connect(ipv4, port),
+                AddrV2::Ipv6(ipv6) => proxy.connect(ipv6, port),
+                AddrV2::TorV3(pubkey) => proxy.connect(OnionAddress::from_pubkey(pubkey), port),
+                _ => {
+                    debug!(target: Category::NODE, "Feeler skip: unsupported address type {}", dest);
+                    return;
+                }
+            };
+            match conn {
+                Ok(c) => conf.handshake(c, timeouts),
+                Err(e) => Err(p2p::net::Error::Io(e)),
+            }
+        }
+        None => match dest.addr {
+            AddrV2::Ipv4(ipv4) => conf.open_connection((ipv4, port), timeouts),
+            AddrV2::Ipv6(ipv6) => conf.open_connection((ipv6, port), timeouts),
+            _ => {
+                debug!(target: Category::NODE, "Feeler skip: cannot reach {} without proxy", dest);
+                return;
+            }
+        },
+    };
+    match result {
+        Ok(_) => {
+            info!(target: Category::NODE, "Successful feeler connection opened to {}", dest);
+            table.successful_connection(&record);
+        }
+        Err(_) => {
+            info!(target: Category::NODE, "Failed feeler connection to {}", dest);
+            table.failed_connection(&record);
+        }
+    }
+}
+
+fn broadcast_transaction(
+    table: &mut AddrTable,
+    network: Network,
+    proxy: Option<&Socks5Proxy>,
+    tx: &Transaction,
+) -> bool {
+    let txid = tx.compute_txid();
+    let start = Instant::now();
+    while start.elapsed() < BROADCAST_TIMEOUT {
+        let Some(record) = table.select() else {
+            break;
+        };
+        let (addr, port) = record.network_addr();
+        let dest = Destination { addr, port };
+        let conf = ConnectionConfig::new()
+            .change_network(network)
+            .offer_services(ServiceFlags::WITNESS)
+            .user_agent("/kernel-node:0.1.0/".into());
+        let mut timeouts = TimeoutParams::new();
+        timeouts.read_timeout(Duration::from_secs(1));
+        let result: Result<_, p2p::net::Error> = match proxy {
+            Some(proxy) => {
+                let conn = match dest.addr {
+                    AddrV2::Ipv4(ipv4) => proxy.connect(ipv4, port),
+                    AddrV2::Ipv6(ipv6) => proxy.connect(ipv6, port),
+                    AddrV2::TorV3(pubkey) => proxy.connect(OnionAddress::from_pubkey(pubkey), port),
+                    _ => {
+                        debug!(target: Category::NODE, "Broadcast skip: unsupported address type {}", dest);
+                        continue;
+                    }
+                };
+                match conn {
+                    Ok(c) => conf.handshake(c, timeouts),
+                    Err(e) => Err(p2p::net::Error::Io(e)),
+                }
+            }
+            None => match dest.addr {
+                AddrV2::Ipv4(ipv4) => conf.open_connection((ipv4, port), timeouts),
+                AddrV2::Ipv6(ipv6) => conf.open_connection((ipv6, port), timeouts),
+                _ => {
+                    debug!(target: Category::NODE, "Broadcast skip: cannot reach {} without proxy", dest);
+                    continue;
+                }
+            },
+        };
+        match result {
+            Ok((writer, mut reader, _)) => {
+                match writer.send_message(NetworkMessage::Tx(tx.clone())) {
+                    Ok(_) => {
+                        let nonce: u64 = random();
+                        if let Err(e) = writer.send_message(NetworkMessage::Ping(nonce)) {
+                            warn!(target: Category::NODE, "Failed to ping {} after sending {}: {}", dest, txid, e);
+                        } else if wait_for_pong(&mut reader, nonce) {
+                            info!(target: Category::NODE, "Broadcast transaction {} to {}", txid, dest);
+                            table.successful_connection(&record);
+                            return true;
+                        } else {
+                            warn!(target: Category::NODE, "No pong from {} confirming {}", dest, txid);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(target: Category::NODE, "Failed to send transaction to {}: {}", dest, e);
+                    }
+                }
+            }
+            Err(_) => {
+                info!(target: Category::NODE, "Failed broadcast connection to {}", dest);
+                table.failed_connection(&record);
+            }
+        }
+    }
+    warn!(target: Category::NODE, "Failed to broadcast transaction {}", txid);
+    false
+}
+
+fn wait_for_pong(reader: &mut ConnectionReader, nonce: u64) -> bool {
+    let deadline = Instant::now() + BROADCAST_PONG_TIMEOUT;
+    while Instant::now() < deadline {
+        match reader.read_message() {
+            Ok(Some(NetworkMessage::Pong(received))) if received == nonce => return true,
+            Ok(_) => continue,
+            Err(p2p::net::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue
+            }
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, std::hash::Hash)]
