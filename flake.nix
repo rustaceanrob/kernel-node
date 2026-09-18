@@ -30,8 +30,6 @@
 
           buildInputs = with pkgs; [
             boost
-            libevent
-            sqlite
           ];
 
           LIBCLANG_PATH = "${pkgs.llvmPackages_19.libclang.lib}/lib";
