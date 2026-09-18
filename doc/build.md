@@ -15,13 +15,13 @@ The node links against `bitcoinkernel`, which requires the same toolchain and sy
 #### Ubuntu / Debian
 
 ```bash
-sudo apt-get install build-essential cmake pkgconf python3 libevent-dev libboost-dev capnproto libcapnp-dev
+sudo apt-get install build-essential cmake pkgconf python3 libboost-dev capnproto libcapnp-dev
 ```
 
 #### Arch Linux
 
 ```bash
-sudo pacman -S --needed base-devel cmake pkgconf python libevent boost capnproto
+sudo pacman -S --needed base-devel cmake pkgconf python boost capnproto
 ```
 
 #### NixOS
@@ -29,8 +29,10 @@ sudo pacman -S --needed base-devel cmake pkgconf python libevent boost capnproto
 Drop into a shell with the required dependencies:
 
 ```bash
-nix-shell -p gcc cmake pkg-config python3 libevent boost capnproto
+nix-shell -p gcc cmake pkg-config python3 boost capnproto
 ```
+
+Or use the provided flake in the repository root.
 
 #### macOS
 
@@ -38,5 +40,5 @@ Install the Xcode Command Line Tools and the dependencies via [Homebrew](https:/
 
 ```bash
 xcode-select --install
-brew install cmake pkgconf boost libevent capnp
+brew install cmake pkgconf boost capnp
 ```
