@@ -27,8 +27,7 @@ use p2p::{
 use crate::{
     ext::{CrateBlockExt, CrateHeaderExt},
     logging::Category,
-    peer_manager::{self, Destination},
-    socks5::Socks5Proxy,
+    net::{addr::Destination, manager, socks5::Socks5Proxy},
 };
 
 const PROTOCOL_VERSION: ProtocolVersion = 70015;
@@ -510,8 +509,7 @@ impl BitcoinPeer {
             .set_service_requirement(ServiceFlags::NETWORK)
             .offer_services(ServiceFlags::WITNESS)
             .user_agent("/kernel-node:0.1.0/".into());
-        let (writer, reader) =
-            peer_manager::connect(conf, &destination, proxy.as_ref(), READ_TIMEOUT)?;
+        let (writer, reader) = manager::connect(conf, &destination, proxy.as_ref(), READ_TIMEOUT)?;
 
         let locators = build_block_locators(node_state.chainman.best_entry().unwrap());
         debug!(target: Category::NET, "Sending headers message...");

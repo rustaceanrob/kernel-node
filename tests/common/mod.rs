@@ -13,7 +13,7 @@ use bitcoin::{
     Witness,
 };
 use corepc_node::{Conf, Node, P2P};
-use kernel_node::server_capnp::server;
+use kernel_node::ipc::server_capnp::server;
 use silentpayments::sending::generate_recipient_pubkeys;
 use silentpayments::utils::sending::calculate_partial_secret;
 use silentpayments::SilentPaymentCode;

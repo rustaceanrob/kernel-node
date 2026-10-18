@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     ops::DerefMut,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -21,16 +21,13 @@ use p2p::{
 
 use crate::{
     logging::Category,
-    peer::{BitcoinPeer, NodeState},
-    socks5::{OnionAddress, Socks5Proxy},
+    net::{
+        addr::{AddrTable, Destination},
+        peer::{BitcoinPeer, NodeState},
+        socks5::{OnionAddress, Socks5Proxy},
+    },
     FatalShutdown,
 };
-
-const TABLE_WIDTH: usize = 16;
-const TABLE_SLOT: usize = 16;
-const MAX_BUCKETS: usize = 4;
-
-pub type AddrTable = addrman::Table<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>;
 
 const DEFAULT_MAX_PEERS: usize = 8;
 
@@ -388,40 +385,4 @@ fn wait_for_pong(reader: &mut ConnectionReader, nonce: u64) -> bool {
         }
     }
     false
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, std::hash::Hash)]
-pub struct Destination {
-    pub addr: AddrV2,
-    pub port: u16,
-}
-
-impl Destination {
-    pub fn new(addr: AddrV2, port: u16) -> Self {
-        Self { addr, port }
-    }
-
-    pub fn from_socket_addr(socket_addr: SocketAddr) -> Self {
-        match socket_addr.ip() {
-            IpAddr::V4(ipv4) => Destination {
-                addr: AddrV2::Ipv4(ipv4),
-                port: socket_addr.port(),
-            },
-            IpAddr::V6(ipv6) => Destination {
-                addr: AddrV2::Ipv6(ipv6),
-                port: socket_addr.port(),
-            },
-        }
-    }
-}
-
-impl core::fmt::Display for Destination {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.addr {
-            AddrV2::Ipv4(ipv4) => write!(f, "{}:{}", ipv4, self.port),
-            AddrV2::Ipv6(ipv6) => write!(f, "{}:{}", ipv6, self.port),
-            AddrV2::TorV3(torv3) => write!(f, "{}:{}", OnionAddress::from_pubkey(torv3), self.port),
-            _ => write!(f, "unreachable address"),
-        }
-    }
 }

@@ -4,7 +4,7 @@ use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1, SecretKey, XOnlyPublicKey};
 use clap::Parser;
 use kernel_node::ext::DirnameExt;
-use kernel_node::server_capnp::server;
+use kernel_node::ipc::server_capnp::server;
 use tokio::net::UnixStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;

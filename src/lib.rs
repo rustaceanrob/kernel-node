@@ -1,7 +1,4 @@
-use ::bitcoin::Network;
 use log::error;
-use p2p::dns::{BITCOIN_SEEDS, SIGNET_SEEDS, TESTNET3_SEEDS, TESTNET4_SEEDS};
-use std::net::IpAddr;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -10,9 +7,7 @@ use std::sync::{
 pub mod daemonize;
 pub mod ext;
 pub mod ipc;
-pub mod peer;
-pub mod peer_manager;
-pub mod socks5;
+pub mod net;
 
 pub mod logging {
     pub struct Category;
@@ -58,33 +53,3 @@ impl FatalShutdown {
         }
     }
 }
-
-pub fn resolve_seeds(network: Network) -> Vec<IpAddr> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let format_hostname = |host: &str| format!("{host}:53");
-    let seeds: Vec<String> = match network {
-        Network::Bitcoin => BITCOIN_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Signet => SIGNET_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Testnet => TESTNET3_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Testnet4 => TESTNET4_SEEDS.into_iter().map(format_hostname).collect(),
-        Network::Regtest => Vec::new(),
-    };
-    let mut results = Vec::new();
-    for host in seeds {
-        let peers = rt.block_on(async move {
-            tokio::net::lookup_host(host)
-                .await
-                .map(|sockets| sockets.map(|socket| socket.ip()).collect())
-                .unwrap_or(Vec::new())
-        });
-        results.extend(peers);
-    }
-    results
-}
-
-capnp::generated_code!(pub mod server_capnp);
-capnp::generated_code!(pub mod wallet_capnp);
-capnp::generated_code!(pub mod chain_capnp);

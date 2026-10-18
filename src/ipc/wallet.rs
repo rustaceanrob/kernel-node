@@ -1,111 +1,11 @@
 use std::sync::{mpsc, Arc, Mutex};
 
 use bitcoin::consensus::Decodable;
-use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{SecretKey, XOnlyPublicKey};
-use bitcoin::{Amount, BlockHash, FeeRate, Transaction};
-use bitcoinkernel::{core::BlockHashExt, ChainstateManager};
+use bitcoin::{Amount, FeeRate, Transaction};
 use wallet::silentpayments::{Recipient, Wallet};
 
-use crate::{chain_capnp, server_capnp, wallet_capnp};
-
-pub struct IpcInterface {
-    tx: mpsc::Sender<()>,
-    broadcast_tx: mpsc::SyncSender<Transaction>,
-    state: Arc<Mutex<Wallet>>,
-    chainman: Arc<ChainstateManager>,
-}
-
-impl IpcInterface {
-    pub fn new(
-        tx: mpsc::Sender<()>,
-        broadcast_tx: mpsc::SyncSender<Transaction>,
-        state: Arc<Mutex<Wallet>>,
-        chainman: Arc<ChainstateManager>,
-    ) -> Self {
-        Self {
-            tx,
-            broadcast_tx,
-            state,
-            chainman,
-        }
-    }
-}
-
-impl server_capnp::server::Server for IpcInterface {
-    async fn echo(
-        self: capnp::capability::Rc<Self>,
-        params: server_capnp::server::EchoParams,
-        mut results: server_capnp::server::EchoResults,
-    ) -> Result<(), capnp::Error> {
-        let request = params.get()?.get_msg()?;
-        let msg = request.to_string()?;
-        results.get().set_reply(msg);
-        Ok(())
-    }
-
-    async fn shutdown(
-        self: capnp::capability::Rc<Self>,
-        _: server_capnp::server::ShutdownParams,
-        _: server_capnp::server::ShutdownResults,
-    ) -> Result<(), capnp::Error> {
-        self.tx
-            .send(())
-            .map_err(|_| capnp::Error::failed("could not shutdown server.".to_string()))?;
-        Ok(())
-    }
-
-    async fn make_wallet(
-        self: capnp::capability::Rc<Self>,
-        _: server_capnp::server::MakeWalletParams,
-        mut results: server_capnp::server::MakeWalletResults,
-    ) -> Result<(), capnp::Error> {
-        let client: wallet_capnp::wallet::Client = capnp_rpc::new_client(WalletIpcInterface::new(
-            self.state.clone(),
-            self.broadcast_tx.clone(),
-        ));
-        results.get().set_wallet(client);
-        Ok(())
-    }
-
-    async fn make_chain(
-        self: capnp::capability::Rc<Self>,
-        _: server_capnp::server::MakeChainParams,
-        mut results: server_capnp::server::MakeChainResults,
-    ) -> Result<(), capnp::Error> {
-        let client: chain_capnp::chain::Client =
-            capnp_rpc::new_client(ChainIpcInterface::new(self.chainman.clone()));
-        results.get().set_chain(client);
-        Ok(())
-    }
-}
-
-pub struct ChainIpcInterface {
-    chainman: Arc<ChainstateManager>,
-}
-
-impl ChainIpcInterface {
-    pub fn new(chainman: Arc<ChainstateManager>) -> Self {
-        Self { chainman }
-    }
-}
-
-impl chain_capnp::chain::Server for ChainIpcInterface {
-    async fn get_tip(
-        self: capnp::capability::Rc<Self>,
-        _: chain_capnp::chain::GetTipParams,
-        mut results: chain_capnp::chain::GetTipResults,
-    ) -> Result<(), capnp::Error> {
-        let tip = self.chainman.active_chain().tip();
-        let height = tip.height();
-        let hash = BlockHash::from_byte_array(tip.block_hash().to_bytes());
-
-        let mut r = results.get();
-        r.set_height(height as u32);
-        r.set_hash(hash.to_string());
-        Ok(())
-    }
-}
+use super::wallet_capnp;
 
 pub struct WalletIpcInterface {
     state: Arc<Mutex<Wallet>>,

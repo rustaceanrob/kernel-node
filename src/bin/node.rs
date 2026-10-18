@@ -22,13 +22,14 @@ use bitcoinkernel::{
 use kernel_node::{
     daemonize::Daemonize,
     ext::{ChainExt, DirnameExt, NetworkExt},
-    ipc::IpcInterface,
+    ipc::{server_capnp::server, IpcInterface},
     logging::Category,
-    peer::{DownloadState, NodeState},
-    peer_manager::PeerManager,
-    resolve_seeds,
-    server_capnp::server,
-    socks5::Socks5Proxy,
+    net::{
+        addr::{resolve_seeds, AddrTable},
+        manager::PeerManager,
+        peer::{DownloadState, NodeState},
+        socks5::Socks5Proxy,
+    },
     FatalShutdown, ScanEvent,
 };
 use log::{debug, error, info, warn};
@@ -37,10 +38,6 @@ use tokio::net::UnixListener;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wallet::io::FileExt;
 use wallet::silentpayments::{SilentPaymentKeysFile, SpendKey, Wallet, WalletStore};
-
-const TABLE_WIDTH: usize = 16;
-const TABLE_SLOT: usize = 16;
-const MAX_BUCKETS: usize = 4;
 
 const DNS_RESOLVER: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
 
@@ -153,7 +150,7 @@ fn run(
     wallet_store: WalletStore,
     fatal: FatalShutdown,
 ) -> std::io::Result<()> {
-    let mut table = addrman::Table::<TABLE_WIDTH, TABLE_SLOT, MAX_BUCKETS>::new();
+    let mut table = AddrTable::new();
     match connect {
         Some(connect) => {
             let record = match connect.ip() {
