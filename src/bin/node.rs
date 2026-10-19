@@ -156,7 +156,7 @@ fn run(
     proxy: Option<Socks5Proxy>,
     node_state: NodeState,
     shutdown_rx: mpsc::Receiver<()>,
-    addr_rx: mpsc::Receiver<Vec<AddrV2Message>>,
+    addr_rx: mpsc::Receiver<(AddrV2, Vec<AddrV2Message>)>,
     scan_rx: mpsc::Receiver<ScanEvent>,
     broadcast_rx: mpsc::Receiver<Transaction>,
     wallet: Arc<Mutex<Wallet>>,
@@ -246,17 +246,17 @@ fn run(
         info!(target: Category::NODE, "Starting addr processing thread.");
         while running_addr.load(Ordering::SeqCst) {
             match addr_rx.recv_timeout(Duration::from_secs(1)) {
-                Ok(payload) => {
+                Ok((source, payload)) => {
                     let mut addr_lock = addrman.lock().unwrap();
                     for address in payload {
                         if let AddrV2::Unknown(..) = address.addr {
                             continue;
                         }
-                        let record = addrman::Record::new(
+                        let record = addrman::Record::new_from_addrv2_source(
                             address.addr,
                             address.port,
                             address.services,
-                            &DNS_RESOLVER,
+                            &source,
                         );
                         addr_lock.add(&record);
                     }
