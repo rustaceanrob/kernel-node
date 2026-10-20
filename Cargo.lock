@@ -180,7 +180,6 @@ checksum = "2dee39a0ee5b4095224a0cfc6bf4cc1baf0f9624b96b367e53b66d974e51d953"
 [[package]]
 name = "bitcoin-p2p"
 version = "0.1.0"
-source = "git+https://github.com/2140-dev/bitcoin-p2p.git?rev=5dc03375636a10487c7e50659416876c28f58a3b#5dc03375636a10487c7e50659416876c28f58a3b"
 dependencies = [
  "bitcoin",
 ]
