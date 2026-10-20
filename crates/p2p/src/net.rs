@@ -1,0 +1,487 @@
+use std::{
+    fmt::Display,
+    io::{self, BufRead, BufReader, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::{
+        mpsc::{self},
+        Arc, Mutex,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use bitcoin::p2p::{
+    message::{NetworkMessage, RawNetworkMessage},
+    message_blockdata::Inventory,
+    Magic,
+};
+use bitcoin::{consensus::encode::Error as DeserializeError, key::rand::random};
+
+use crate::{
+    handshake::{self, CompletedHandshake, ConnectionConfig},
+    ConnectionMetrics, OutboundPing, Preferences, TimedMessage, TimedMessages, V1MessageHeader,
+};
+
+/// Maximum amount of time the peer has to seed a message after idling.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// The interval to send a new ping message.
+pub const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// The initial TCP handshake timeout.
+pub const TCP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Open or begin a connection to an inbound or outbound peer.
+pub trait ConnectionExt: Send + Sync {
+    /// Facilitate a version handshake on a potentially open connection. One use for this method is
+    /// to begin a handshake over an existing Socks5 proxy.
+    fn handshake(
+        self,
+        tcp_stream: TcpStream,
+        timeout_params: TimeoutParams,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionMetrics), Error>;
+
+    /// Listen for inbound connections on the specified socket address.
+    fn listen(
+        self,
+        bind: impl Into<SocketAddr>,
+        timeout_params: TimeoutParams,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionMetrics), Error>;
+
+    /// Open an outbound connection to the specified socket address.
+    fn open_connection(
+        self,
+        to: impl Into<SocketAddr>,
+        timeout_params: TimeoutParams,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionMetrics), Error>;
+}
+
+impl ConnectionExt for ConnectionConfig {
+    fn open_connection(
+        self,
+        to: impl Into<SocketAddr>,
+        timeout_params: TimeoutParams,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionMetrics), Error> {
+        let tcp_stream = TcpStream::connect_timeout(&to.into(), timeout_params.tcp)?;
+        tcp_stream.set_read_timeout(timeout_params.read)?;
+        tcp_stream.set_write_timeout(timeout_params.write)?;
+        Self::handshake(self, tcp_stream, timeout_params)
+    }
+
+    fn listen(
+        self,
+        bind: impl Into<SocketAddr>,
+        timeout_params: TimeoutParams,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionMetrics), Error> {
+        let listener = TcpListener::bind(bind.into())?;
+        let (tcp_stream, _) = listener.accept()?;
+        tcp_stream.set_read_timeout(timeout_params.read)?;
+        tcp_stream.set_write_timeout(timeout_params.write)?;
+        Self::handshake(self, tcp_stream, timeout_params)
+    }
+
+    fn handshake(
+        self,
+        mut tcp_stream: TcpStream,
+        timeout_params: TimeoutParams,
+    ) -> Result<(ConnectionWriter, ConnectionReader, ConnectionMetrics), Error> {
+        let system_time = SystemTime::now();
+        let unix_time = system_time
+            .duration_since(UNIX_EPOCH)
+            .expect("time cannot go backwards.");
+        let nonce = random();
+        let version = self.build_our_version(unix_time, nonce);
+        let mut write_half = WriteTransport::V1(self.network().magic());
+        let mut read_half = ReadTransport::V1(self.network().magic());
+        write_half.write_message(NetworkMessage::Version(version), &mut tcp_stream)?;
+        let tcp_stream_clone = tcp_stream.try_clone()?;
+        let mut buf_reader = BufReader::new(tcp_stream_clone);
+        let (mut handshake, messages) = match read_half.read_message(&mut buf_reader)? {
+            Some(message) => self.start_handshake(unix_time, message, nonce)?,
+            None => return Err(Error::MissingVersion),
+        };
+        for message in messages {
+            write_half.write_message(message, &mut tcp_stream)?;
+        }
+        loop {
+            if let Some(message) = read_half.read_message(&mut buf_reader)? {
+                match handshake.negotiate(message)? {
+                    Some((completed_handshake, responses)) => {
+                        for response in responses {
+                            write_half.write_message(response, &mut tcp_stream)?;
+                        }
+                        let timed_messages =
+                            Arc::new(Mutex::new(TimedMessages::new(Instant::now())));
+                        let outbound_ping = Arc::new(Mutex::new(OutboundPing::LastReceived {
+                            then: Instant::now(),
+                        }));
+                        let CompletedHandshake {
+                            feeler,
+                            their_preferences,
+                        } = completed_handshake;
+                        let arc_pref = Arc::new(Mutex::new(their_preferences));
+                        let live_connection = ConnectionMetrics {
+                            feeler,
+                            their_preferences: Arc::clone(&arc_pref),
+                            timed_messages: Arc::clone(&timed_messages),
+                            start_time: Instant::now(),
+                            outbound_ping_state: Arc::clone(&outbound_ping),
+                        };
+                        let (tx, rx) = mpsc::channel();
+                        let open_writer = OpenWriter {
+                            tcp_stream,
+                            transport: write_half,
+                            receiver: rx,
+                            outbound_ping_state: Arc::clone(&outbound_ping),
+                            ping_interval: timeout_params.ping_interval,
+                        };
+                        let write_handle =
+                            std::thread::spawn(move || open_writer.maintain_connection());
+                        let writer = ConnectionWriter {
+                            sender: tx,
+                            task_handle: write_handle,
+                        };
+                        let reader = ConnectionReader {
+                            tcp_stream: buf_reader,
+                            transport: read_half,
+                            their_preferences: Arc::clone(&arc_pref),
+                            timed_messages,
+                            outbound_ping_state: Arc::clone(&outbound_ping),
+                        };
+                        return Ok((writer, reader, live_connection));
+                    }
+                    None => continue,
+                }
+            }
+        }
+    }
+}
+
+/// Configurations for ending a connection due to inactivity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutParams {
+    read: Option<Duration>,
+    write: Option<Duration>,
+    tcp: Duration,
+    ping_interval: Duration,
+}
+
+impl TimeoutParams {
+    /// Construct new timeout parameters
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the time a peer has until they have must sent a message.
+    pub fn read_timeout(&mut self, timeout: Duration) {
+        self.read = Some(timeout)
+    }
+
+    /// Maximum amount of time it should take to write a message.
+    pub fn write_timeout(&mut self, timeout: Duration) {
+        self.write = Some(timeout)
+    }
+
+    /// The initial TCP handshake timeout.
+    pub fn tcp_handshake_timeout(&mut self, timeout: Duration) {
+        self.tcp = timeout;
+    }
+
+    /// How often is this peer pinged for activity
+    pub fn ping_interval(&mut self, every: Duration) {
+        self.ping_interval = every
+    }
+}
+
+impl Default for TimeoutParams {
+    fn default() -> Self {
+        Self {
+            read: Some(READ_TIMEOUT),
+            write: None,
+            tcp: TCP_TIMEOUT,
+            ping_interval: PING_INTERVAL,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum WriteRequest {
+    Shutdown,
+    SendMessage(NetworkMessage),
+}
+
+/// Send messages to an open connection.
+#[derive(Debug)]
+pub struct ConnectionWriter {
+    sender: mpsc::Sender<WriteRequest>,
+    task_handle: JoinHandle<Result<(), io::Error>>,
+}
+
+#[allow(clippy::result_large_err)]
+impl ConnectionWriter {
+    /// Send a network message to this peer. Errors indicate that the connection is terminated and
+    /// no further messages will succeed.
+    pub fn send_message(&self, network_message: NetworkMessage) -> Result<(), Error> {
+        self.sender
+            .send(WriteRequest::SendMessage(network_message))
+            .map_err(|_| Error::ChannelClosed)
+    }
+
+    /// Kill both sides of the connection, erroring if the stream is already closed.
+    pub fn shutdown(&self) -> Result<(), Error> {
+        self.sender
+            .send(WriteRequest::Shutdown)
+            .map_err(|_| Error::ChannelClosed)
+    }
+
+    /// In the event of a failed message, investigate IO related failures if the connection was not
+    /// closed gracefully.
+    pub fn take_errors(self) -> Option<io::Error> {
+        self.task_handle.join().ok()?.err()
+    }
+}
+
+#[derive(Debug)]
+struct OpenWriter {
+    tcp_stream: TcpStream,
+    transport: WriteTransport,
+    receiver: mpsc::Receiver<WriteRequest>,
+    outbound_ping_state: Arc<Mutex<OutboundPing>>,
+    ping_interval: Duration,
+}
+
+impl OpenWriter {
+    fn maintain_connection(mut self) -> Result<(), std::io::Error> {
+        loop {
+            let message = self.receiver.recv_timeout(Duration::from_secs(1));
+            match message {
+                Ok(request) => match request {
+                    WriteRequest::SendMessage(message) => self
+                        .transport
+                        .write_message(message, &mut self.tcp_stream)?,
+                    WriteRequest::Shutdown => {
+                        self.tcp_stream.shutdown(std::net::Shutdown::Both)?;
+                    }
+                },
+                Err(e) => match e {
+                    mpsc::RecvTimeoutError::Timeout => (),
+                    _ => return Ok(()),
+                },
+            }
+            if let Ok(mut ping) = self.outbound_ping_state.lock() {
+                match *ping {
+                    OutboundPing::LastReceived { then } => {
+                        if then.elapsed() > self.ping_interval {
+                            let nonce: u64 = random();
+                            self.transport
+                                .write_message(NetworkMessage::Ping(nonce), &mut self.tcp_stream)?;
+
+                            *ping = OutboundPing::Waiting {
+                                nonce,
+                                then: Instant::now(),
+                            }
+                        }
+                    }
+                    OutboundPing::Waiting { nonce: _, then: _ } => continue,
+                }
+            }
+            // Do traffic shaping or gossip addrs
+        }
+    }
+}
+
+/// Read messages from an open connection.
+#[derive(Debug)]
+pub struct ConnectionReader {
+    tcp_stream: BufReader<TcpStream>,
+    transport: ReadTransport,
+    their_preferences: Arc<Mutex<Preferences>>,
+    timed_messages: Arc<Mutex<TimedMessages>>,
+    outbound_ping_state: Arc<Mutex<OutboundPing>>,
+}
+
+impl ConnectionReader {
+    /// Wait for a message while blocking the current thread of execution.
+    pub fn read_message(&mut self) -> Result<Option<NetworkMessage>, Error> {
+        let message = self.transport.read_message(&mut self.tcp_stream)?;
+        if let Some(message) = &message {
+            match message {
+                NetworkMessage::SendHeaders => {
+                    if let Ok(mut lock) = self.their_preferences.lock() {
+                        lock.sendheaders = true;
+                    }
+                }
+                NetworkMessage::SendCmpct(cmpct) => {
+                    if let Ok(mut lock) = self.their_preferences.lock() {
+                        lock.sendcmpct = *cmpct;
+                    }
+                }
+                NetworkMessage::Block(_) => {
+                    if let Ok(mut lock) = self.timed_messages.lock() {
+                        lock.add_single(TimedMessage::Block, Instant::now());
+                    }
+                }
+                NetworkMessage::Headers(_) => {
+                    if let Ok(mut lock) = self.timed_messages.lock() {
+                        lock.add_single(TimedMessage::BlockHeaders, Instant::now());
+                        lock.last_block = Instant::now();
+                    }
+                }
+                NetworkMessage::CFilter(_) => {
+                    if let Ok(mut lock) = self.timed_messages.lock() {
+                        lock.add_single(TimedMessage::CFilters, Instant::now());
+                    }
+                }
+                NetworkMessage::Addr(list) => {
+                    if let Ok(mut lock) = self.timed_messages.lock() {
+                        lock.add_many(TimedMessage::Addr, list.len(), Instant::now());
+                    }
+                }
+                NetworkMessage::AddrV2(list) => {
+                    if let Ok(mut lock) = self.timed_messages.lock() {
+                        lock.add_many(TimedMessage::Addr, list.len(), Instant::now());
+                    }
+                }
+                NetworkMessage::Pong(pong) => {
+                    // There are bigger problems with this connection if the lock fails, so it is
+                    // okay to ignore the nonce.
+                    if let Ok(mut lock) = self.outbound_ping_state.lock() {
+                        if let OutboundPing::Waiting { nonce, then: _ } = *lock {
+                            if *pong == nonce {
+                                *lock = OutboundPing::LastReceived {
+                                    then: Instant::now(),
+                                };
+                            }
+                        }
+                    }
+                }
+                NetworkMessage::Inv(payload) => {
+                    let now = Instant::now();
+                    if let Ok(mut lock) = self.timed_messages.lock() {
+                        for inv in payload {
+                            if matches!(
+                                inv,
+                                Inventory::WTx(_)
+                                    | Inventory::WitnessTransaction(_)
+                                    | Inventory::Transaction(_)
+                            ) {
+                                lock.add_single(TimedMessage::TransactionAnnouncement, now);
+                            }
+                            if matches!(
+                                inv,
+                                Inventory::Block(_)
+                                    | Inventory::WitnessBlock(_)
+                                    | Inventory::CompactBlock(_)
+                            ) {
+                                lock.last_block = now;
+                            }
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+        Ok(message)
+    }
+}
+
+#[derive(Debug)]
+enum WriteTransport {
+    V1(Magic),
+}
+
+impl WriteTransport {
+    fn write_message<W: Write>(
+        &mut self,
+        network_message: NetworkMessage,
+        writer: &mut W,
+    ) -> Result<(), io::Error> {
+        match self {
+            WriteTransport::V1(magic) => {
+                let raw = RawNetworkMessage::new(*magic, network_message);
+                let bytes = bitcoin::consensus::serialize(&raw);
+                writer.write_all(&bytes)?;
+                writer.flush()?;
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ReadTransport {
+    V1(Magic),
+}
+
+impl ReadTransport {
+    fn read_message<R: BufRead>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<Option<NetworkMessage>, Error> {
+        match self {
+            ReadTransport::V1(magic) => {
+                let mut message_buf = vec![0; 24];
+                reader.read_exact(&mut message_buf)?;
+                let message_header =
+                    bitcoin::consensus::deserialize::<V1MessageHeader>(&message_buf)?;
+                if message_header.magic != *magic {
+                    return Err(Error::UnexpectedMagic(message_header.magic));
+                }
+                // Will panic on machines with under 32 bit precision
+                let mut contents_buf = vec![0; message_header.length as usize];
+                reader.read_exact(&mut contents_buf)?;
+                message_buf.extend_from_slice(&contents_buf);
+                let message = bitcoin::consensus::deserialize::<RawNetworkMessage>(&message_buf)?;
+                Ok(Some(message.into_payload()))
+            }
+        }
+    }
+}
+
+/// Errors that occur during a connection.
+#[derive(Debug)]
+pub enum Error {
+    /// A message was not deserialized according to protocol specifications.
+    Deserialize(DeserializeError),
+    /// An IO related error occurred.
+    Io(io::Error),
+    /// An error occurred during the version handshake.
+    Handshake(handshake::Error),
+    /// The peer sent magic that does not belong to the current network.
+    UnexpectedMagic(Magic),
+    /// The peer did not send a version message.
+    MissingVersion,
+    /// The channel to the message writing thread was closed.
+    ChannelClosed,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Deserialize(d) => d.fmt(f),
+            Error::Io(e) => e.fmt(f),
+            Error::Handshake(e) => e.fmt(f),
+            Error::UnexpectedMagic(magic) => write!(f, "unexpected network magic: {magic}"),
+            Error::MissingVersion => write!(f, "missing version message."),
+            Error::ChannelClosed => write!(f, "channel closed"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<DeserializeError> for Error {
+    fn from(value: DeserializeError) -> Self {
+        Self::Deserialize(value)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
+impl From<handshake::Error> for Error {
+    fn from(value: handshake::Error) -> Self {
+        Self::Handshake(value)
+    }
+}

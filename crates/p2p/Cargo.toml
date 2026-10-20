@@ -1,0 +1,11 @@
+[package]
+name = "bitcoin-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bitcoin_p2p"
+
+[dependencies]
+bitcoin = { version = "0.32.8", features = ["rand-std"] }
+
