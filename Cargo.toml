@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/p2p", "crates/wallet"]
+members = [".", "crates/address-book", "crates/p2p", "crates/wallet"]
 resolver = "2"
 
 [package]
@@ -11,7 +11,7 @@ rust-version = "1.85.0"
 [dependencies]
 # bitcoinkernel = { path = "../rust-bitcoinkernel", version = "0.0.15" }
 bitcoinkernel = "0.3"
-addrman = { package = "bitcoin-address-book", version = "0.1.1" }
+addrman = { package = "bitcoin-address-book", path = "crates/address-book" }
 bitcoin = { version = "0.32.8", features = ["rand-std"] }
 bitcoin_hashes = "1.2.0"
 p2p = { package = "bitcoin-p2p", path = "crates/p2p" }

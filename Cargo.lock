@@ -140,11 +140,10 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-address-book"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "060c05780195789a7b89bbfe7f57a1a8cd6ae0bb3daa9b96eeca4fbe0ba8014f"
+version = "0.2.2"
 dependencies = [
  "bitcoin",
+ "tempfile",
 ]
 
 [[package]]
